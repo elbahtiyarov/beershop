@@ -495,9 +495,7 @@ function renderLogin() {
         <button type="submit" class="btn btn-primary" style="width:100%;">Войти</button>
       </form>
       <div class="demo-hint">
-        Демо-доступ (смените после установки):<br>
-        Админ — <b>admin</b> / <b>admin123</b><br>
-        Кассир — <b>kassir</b> / <b>kassir123</b>
+        
       </div>
     </div>
   </div>`;
