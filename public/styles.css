@@ -219,12 +219,11 @@ td input, td select{ padding:6px 8px; border-radius:6px; border:1px solid var(--
   .content{ padding: 16px; }
   .pos-grid{ grid-template-columns: 1fr; }
   .cart-panel{ position:static; }
-  .scan-bar{ top:64px; border-radius:0; margin: -16px -16px 16px; z-index:5; }
+  .scan-bar{ top:64px; margin-top:16px; z-index:5; }
 }
 @media (max-width: 480px){
   .product-grid{ grid-template-columns: repeat(2, 1fr); }
   .login-card{ padding: 28px 22px; }
-  .scan-bar .scan-hint{ display:none; }
 }
 @media print{
   body *{ visibility:hidden; }
@@ -245,7 +244,8 @@ td input, td select{ padding:6px 8px; border-radius:6px; border:1px solid var(--
   .product-card{ min-height: 44px; }
   .cart-item .icon-btn, .row-actions .btn{ flex-shrink: 0; }
   .content{ padding: 14px; }
-  .scan-bar{ margin: -14px -14px 16px; }
+  .scan-bar{ margin-top:16px; }
+  .scan-bar .scan-hint{ display:none; }
   .page-head h2{ font-size: 1.35rem; }
   .cart-total-row .amount{ font-size: 1.25rem; }
   .field input, .field select{ padding: 12px; }
