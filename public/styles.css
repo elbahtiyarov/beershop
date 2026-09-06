@@ -14,6 +14,7 @@
   --radius: 10px;
 }
 *{box-sizing:border-box;}
+html{ -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
 html,body{margin:0;padding:0;}
 body{
   background: var(--bg);
@@ -23,7 +24,10 @@ body{
   color: var(--ink);
   font-family: 'Inter', sans-serif;
   min-height: 100vh;
+  min-height: 100dvh;
+  overflow-x: hidden;
 }
+button, .chip, .nav-item, .product-card{ touch-action: manipulation; -webkit-tap-highlight-color: transparent; }
 h1,h2,h3,.display{
   font-family: 'Oswald', sans-serif;
   text-transform: uppercase;
@@ -214,4 +218,57 @@ td input, td select{ padding:6px 8px; border-radius:6px; border:1px solid var(--
   .receipt, .receipt *{ visibility:visible; }
   .receipt{ position:absolute; top:0; left:0; width:100%; }
   .receipt-actions, .modal-close-row{ display:none !important; }
+}
+
+/* ===== Телефоны: крупнее зоны нажатия, без авто-зума iOS на полях ввода ===== */
+@media (max-width: 640px){
+  input, select, textarea{ font-size: 16px !important; }
+  .btn{ min-height: 44px; padding: 11px 16px; }
+  .btn-sm{ min-height: 38px; padding: 8px 12px; }
+  .icon-btn{ width: 40px; height: 40px; }
+  .qty-ctrl .icon-btn{ width: 38px; height: 38px; }
+  .nav-item{ min-height: 40px; padding: 10px 14px; }
+  .chip{ min-height: 36px; padding: 8px 14px; }
+  .product-card{ min-height: 44px; }
+  .cart-item .icon-btn, .row-actions .btn{ flex-shrink: 0; }
+  .content{ padding: 14px; }
+  .scan-bar{ margin: -14px -14px 16px; }
+  .page-head h2{ font-size: 1.35rem; }
+  .cart-total-row .amount{ font-size: 1.25rem; }
+  .field input, .field select{ padding: 12px; }
+  table{ min-width: 0; }
+  th, td{ padding: 8px 6px; font-size: 0.82rem; }
+}
+
+/* Очень узкие экраны (складные и старые телефоны) */
+@media (max-width: 360px){
+  .product-grid{ grid-template-columns: repeat(2, 1fr); gap: 10px; }
+  .login-card{ padding: 22px 16px; }
+  .cart-panel{ padding: 14px; }
+  .add-form .field{ min-width: 100%; }
+}
+
+/* Планшеты и моноблоки в портретной ориентации: касса в один столбец,
+   но с более крупной сеткой товаров, чем на телефоне */
+@media (min-width: 641px) and (max-width: 880px){
+  .product-grid{ grid-template-columns: repeat(auto-fill, minmax(150px,1fr)); }
+}
+
+/* Крупные моноблоки и широкие мониторы: чуть просторнее карточки и не растягиваем контент бесконечно */
+@media (min-width: 1440px){
+  .content{ max-width: 1320px; padding: 32px 40px; }
+  .product-grid{ grid-template-columns: repeat(auto-fill, minmax(190px,1fr)); }
+}
+
+/* Учитываем вырезы/чёлку и safe area на телефонах с ними */
+@supports (padding: max(0px)){
+  .content{ padding-left: max(16px, env(safe-area-inset-left)); padding-right: max(16px, env(safe-area-inset-right)); }
+  .sidebar{ padding-left: max(16px, env(safe-area-inset-left)); padding-right: max(16px, env(safe-area-inset-right)); }
+}
+
+/* Устройства без наведения курсора (тач-экраны) — убираем hover-эффекты, которые "залипают" после тапа */
+@media (hover: none){
+  .product-card:hover:not(:disabled){ transform: none; box-shadow: none; }
+  .chip:hover{ background: var(--surface); }
+  .btn-ghost:hover{ background: transparent; }
 }
