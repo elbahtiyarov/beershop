@@ -1,6 +1,7 @@
 const express = require('express');
 const pool = require('../db');
 const { authenticate, requireAdmin } = require('../middleware/auth');
+const { sendWhatsApp } = require('../notify');
 
 const router = express.Router();
 router.use(authenticate);
@@ -40,12 +41,15 @@ router.get('/:id', async (req, res) => {
 // Пересчёт остатков и запись чека выполняются в одной транзакции,
 // чтобы нельзя было продать больше, чем есть на складе.
 router.post('/', async (req, res) => {
-  const { items } = req.body || {};
+  const { items, payment_method, cash_amount, qr_amount, received_amount } = req.body || {};
   if (!Array.isArray(items) || items.length === 0) {
     return res.status(400).json({ error: 'Чек не может быть пустым' });
   }
+  const validMethods = ['cash', 'qr', 'mixed'];
+  const method = validMethods.includes(payment_method) ? payment_method : 'cash';
 
   const client = await pool.connect();
+  const outOfStockAlerts = []; // товары, у которых остаток обнулился именно этой продажей
   try {
     await client.query('BEGIN');
 
@@ -58,18 +62,54 @@ router.post('/', async (req, res) => {
       if (!product) throw Object.assign(new Error(`Товар не найден`), { status: 404 });
       const qty = Number(item.qty) || 0;
       if (qty <= 0) throw Object.assign(new Error('Некорректное количество'), { status: 400 });
-      if (product.stock < qty) {
-        throw Object.assign(new Error(`Недостаточно товара «${product.name}» на складе (осталось ${product.stock})`), { status: 409 });
+
+      // Для разливного (единица «л») одна продажа списывает объём порции (volume_liters),
+      // а не «1 штуку». Для обычных товаров — как раньше, qty штук.
+      const isDraft = product.unit === 'л';
+      const consumption = isDraft ? qty * Number(product.volume_liters || 1) : qty;
+
+      if (Number(product.stock) < consumption) {
+        const unitLabel = isDraft ? 'л' : 'шт';
+        throw Object.assign(new Error(`Недостаточно товара «${product.name}» на складе (осталось ${product.stock} ${unitLabel})`), { status: 409 });
       }
-      await client.query('UPDATE products SET stock = stock - $1 WHERE id = $2', [qty, product.id]);
+
+      const newStock = Number(product.stock) - consumption;
+      await client.query('UPDATE products SET stock = $1 WHERE id = $2', [newStock, product.id]);
+
+      // Уведомление в WhatsApp срабатывает один раз — именно в момент, когда разливное закончилось
+      if (isDraft && Number(product.stock) > 0 && newStock <= 0) {
+        outOfStockAlerts.push(product.name);
+      }
+
       const subtotal = Number(product.price) * qty;
       total += subtotal;
       lineItems.push({ productId: product.id, name: product.name, price: product.price, costPrice: product.cost_price || 0, qty, subtotal });
     }
 
+    // Проверяем способ оплаты уже зная точный итог (нельзя доверять сумме, присланной с фронта, без сверки)
+    let cashAmount = 0;
+    let qrAmount = 0;
+    let receivedAmount = null;
+    if (method === 'cash') {
+      cashAmount = total;
+      receivedAmount = Number(received_amount) || total;
+      if (receivedAmount < total - 0.01) {
+        throw Object.assign(new Error('Сумма наличных меньше итога чека'), { status: 400 });
+      }
+    } else if (method === 'qr') {
+      qrAmount = total;
+    } else {
+      cashAmount = Number(cash_amount) || 0;
+      qrAmount = Number(qr_amount) || 0;
+      if (Math.abs(cashAmount + qrAmount - total) > 0.01) {
+        throw Object.assign(new Error('Сумма наличными и по QR должна совпадать с итогом чека'), { status: 400 });
+      }
+      receivedAmount = cashAmount;
+    }
+
     const receiptResult = await client.query(
-      'INSERT INTO receipts (cashier_id, cashier_name, total) VALUES ($1, $2, $3) RETURNING *',
-      [req.user.id, req.user.name, total]
+      'INSERT INTO receipts (cashier_id, cashier_name, total, payment_method, cash_amount, qr_amount, received_amount) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *',
+      [req.user.id, req.user.name, total, method, cashAmount, qrAmount, receivedAmount]
     );
     const receipt = receiptResult.rows[0];
 
@@ -81,6 +121,11 @@ router.post('/', async (req, res) => {
     }
 
     await client.query('COMMIT');
+
+    for (const name of outOfStockAlerts) {
+      sendWhatsApp(`🍺 Закончилось разливное: «${name}». Остаток — 0 л.`);
+    }
+
     res.status(201).json({ ...receipt, items: lineItems });
   } catch (err) {
     await client.query('ROLLBACK');

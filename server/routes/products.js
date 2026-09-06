@@ -46,15 +46,17 @@ router.get('/barcode/:code', async (req, res) => {
 // Себестоимость может указать только администратор.
 // Редактирование и удаление — ниже, только администратор.
 router.post('/', async (req, res) => {
-  const { name, price, stock, barcode, category, cost_price } = req.body || {};
+  const { name, price, stock, barcode, category, cost_price, unit, volume_liters } = req.body || {};
   if (!name || price === undefined || price === null || Number(price) <= 0) {
     return res.status(400).json({ error: 'Укажите название и корректную цену' });
   }
   try {
     const costPrice = req.user.role === 'admin' ? Number(cost_price) || 0 : 0;
+    const productUnit = unit === 'л' ? 'л' : 'шт';
+    const volumeLiters = productUnit === 'л' ? (Number(volume_liters) || 1) : null;
     const { rows } = await pool.query(
-      'INSERT INTO products (barcode, name, category, price, cost_price, stock) VALUES ($1, $2, $3, $4, $5, $6) RETURNING *',
-      [barcode || null, name, category || 'Пиво', price, costPrice, stock || 0]
+      'INSERT INTO products (barcode, name, category, price, cost_price, stock, unit, volume_liters) VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *',
+      [barcode || null, name, category || 'Пиво', price, costPrice, stock || 0, productUnit, volumeLiters]
     );
     const product = rows[0];
     if (req.user.role !== 'admin') delete product.cost_price;
@@ -67,8 +69,9 @@ router.post('/', async (req, res) => {
 });
 
 router.put('/:id', requireAdmin, async (req, res) => {
-  const { name, price, stock, barcode, image_url, category, cost_price } = req.body || {};
+  const { name, price, stock, barcode, image_url, category, cost_price, unit, volume_liters } = req.body || {};
   try {
+    const productUnit = unit === undefined ? null : (unit === 'л' ? 'л' : 'шт');
     const { rows } = await pool.query(
       `UPDATE products SET
          name = COALESCE($1, name),
@@ -77,9 +80,11 @@ router.put('/:id', requireAdmin, async (req, res) => {
          barcode = $4,
          image_url = COALESCE($5, image_url),
          category = COALESCE($6, category),
-         cost_price = COALESCE($7, cost_price)
-       WHERE id = $8 RETURNING *`,
-      [name, price, stock, barcode || null, image_url === undefined ? null : image_url, category || null, cost_price, req.params.id]
+         cost_price = COALESCE($7, cost_price),
+         unit = COALESCE($8, unit),
+         volume_liters = COALESCE($9, volume_liters)
+       WHERE id = $10 RETURNING *`,
+      [name, price, stock, barcode || null, image_url === undefined ? null : image_url, category || null, cost_price, productUnit, volume_liters, req.params.id]
     );
     if (!rows[0]) return res.status(404).json({ error: 'Товар не найден' });
     res.json(rows[0]);

@@ -24,6 +24,11 @@ let state = {
   posCategoryAdmin: 'all',
   mobileMenuOpen: false,
   showAddProductModal: false,
+  showPaymentModal: false,
+  paymentMethod: 'cash',
+  paymentReceived: '',
+  paymentCashPart: '',
+  paymentQrPart: '',
   categoryMarkups: {},
   analyticsData: null,
   analyticsPeriodDays: 7,
@@ -113,12 +118,29 @@ async function loadAll() {
 function findProductByBarcode(code) {
   return state.products.find(p => p.barcode && p.barcode === code);
 }
+// Сколько «объёма» списывает со склада одна проданная единица товара:
+// для обычных товаров — 1 штука, для разливного («л») — объём порции (1л/1.5л/2л и т.д.)
+function unitConsumption(product) {
+  return product.unit === 'л' ? Number(product.volume_liters || 1) : 1;
+}
+function isLowStock(product) {
+  if (product.unit === 'л') {
+    return Number(product.stock) <= Math.max(unitConsumption(product) * 2, 3);
+  }
+  return Number(product.stock) <= 5;
+}
 function addToCart(productId) {
   const product = state.products.find(p => p.id === productId);
   if (!product) return;
   const inCart = state.cart.find(i => i.productId === productId);
   const qty = inCart ? inCart.qty : 0;
-  if (qty >= product.stock) { flashScan('error'); showToast('Товара «' + product.name + '» больше нет в наличии'); return; }
+  const consumption = unitConsumption(product);
+  const used = qty * consumption;
+  if (used + consumption > Number(product.stock) + 1e-9) {
+    flashScan('error');
+    showToast('Товара «' + product.name + '» больше нет в наличии');
+    return;
+  }
   if (inCart) inCart.qty++;
   else state.cart.push({ productId, name: product.name, price: Number(product.price), qty: 1 });
   render();
@@ -128,9 +150,12 @@ function changeCartQty(productId, delta) {
   if (!item) return;
   const product = state.products.find(p => p.id === productId);
   const newQty = item.qty + delta;
-  if (newQty <= 0) state.cart = state.cart.filter(i => i.productId !== productId);
-  else if (product && newQty > product.stock) return;
-  else item.qty = newQty;
+  if (newQty <= 0) { state.cart = state.cart.filter(i => i.productId !== productId); render(); return; }
+  if (product) {
+    const consumption = unitConsumption(product);
+    if (newQty * consumption > Number(product.stock) + 1e-9) return;
+  }
+  item.qty = newQty;
   render();
 }
 function cartTotal() { return state.cart.reduce((s, i) => s + i.price * i.qty, 0); }
@@ -147,33 +172,43 @@ function focusScanInput() {
 }
 function handleScanSubmit(rawCode) {
   const code = rawCode.trim();
-  const input = document.getElementById('scan-input');
-  if (input) input.value = '';
   if (!code) return;
   const product = findProductByBarcode(code);
   if (product) {
+    state.posSearch = ''; // успешный скан — очищаем поле для следующего товара
     addToCart(product.id);
     flashScan('ok');
   } else {
-    showToast('Штрихкод «' + code + '» не найден в базе товаров');
-    flashScan('error');
+    // Похоже на штрихкод (только цифры, от 6 знаков) — сообщаем, что не нашли.
+    // Иначе это обычный текстовый поиск по названию — список уже отфильтрован вводом, ничего не делаем.
+    if (/^\d{6,}$/.test(code)) {
+      showToast('Штрихкод «' + code + '» не найден в базе товаров');
+      flashScan('error');
+    }
   }
 }
 
-async function checkout() {
+async function checkout(paymentDetails) {
   if (state.cart.length === 0) return;
   try {
     const receipt = await api('/receipts', {
       method: 'POST',
-      body: { items: state.cart.map(i => ({ productId: i.productId, qty: i.qty })) },
+      body: {
+        items: state.cart.map(i => ({ productId: i.productId, qty: i.qty })),
+        payment_method: paymentDetails.payment_method,
+        cash_amount: paymentDetails.cash_amount,
+        qr_amount: paymentDetails.qr_amount,
+        received_amount: paymentDetails.received_amount,
+      },
     });
-    // обновляем локальные остатки
+    // обновляем локальные остатки (для разливного — списываем объём порции, а не «1 штуку»)
     receipt.items.forEach(li => {
       const p = state.products.find(p => p.id === li.productId);
-      if (p) p.stock -= li.qty;
+      if (p) p.stock = Number(p.stock) - li.qty * unitConsumption(p);
     });
     state.receipts.unshift(receipt);
     state.cart = [];
+    state.showPaymentModal = false;
     state.receiptToShow = receipt;
     render();
   } catch (err) {
@@ -231,7 +266,7 @@ async function emptyTrash() {
 /* ============ PRODUCTS (admin) ============ */
 async function updateProduct(id, field, rawValue) {
   const body = {};
-  const textFields = ['name', 'barcode', 'category'];
+  const textFields = ['name', 'barcode', 'category', 'unit'];
   body[field] = textFields.includes(field) ? rawValue : Number(rawValue) || 0;
   try {
     const updated = await api('/products/' + id, { method: 'PUT', body });
@@ -322,14 +357,26 @@ async function addProduct() {
   const barcode = document.getElementById('new-p-barcode').value.trim();
   const costPriceEl = document.getElementById('new-p-cost');
   const costPrice = costPriceEl ? Number(costPriceEl.value) || 0 : 0;
+  const unitEl = document.getElementById('new-p-unit');
+  const unit = unitEl && unitEl.value === 'л' ? 'л' : 'шт';
+  const volumeEl = document.getElementById('new-p-volume');
+  const volumeLiters = unit === 'л' ? (Number(volumeEl?.value) || 1) : null;
   if (!name || !price || price <= 0) { showToast('Укажите название и цену товара'); return; }
   try {
-    const created = await api('/products', { method: 'POST', body: { name, price, stock: stock || 0, barcode: barcode || null, category: category || 'Пиво', cost_price: costPrice } });
+    const created = await api('/products', { method: 'POST', body: { name, price, stock: stock || 0, barcode: barcode || null, category: category || 'Пиво', cost_price: costPrice, unit, volume_liters: volumeLiters } });
     state.products.push(created);
     state.showAddProductModal = false;
     render();
     showToast('Товар добавлен');
   } catch (err) { showToast(err.message); }
+}
+function toggleDraftFieldsInModal() {
+  const unitEl = document.getElementById('new-p-unit');
+  const wrap = document.getElementById('new-p-volume-wrap');
+  const stockLabel = document.getElementById('new-p-stock-label');
+  const isDraft = unitEl && unitEl.value === 'л';
+  if (wrap) wrap.style.display = isDraft ? 'block' : 'none';
+  if (stockLabel) stockLabel.textContent = isDraft ? 'Остаток, л' : 'Остаток';
 }
 function openAddProductModal() {
   state.showAddProductModal = true;
@@ -474,7 +521,7 @@ function toggleMobileMenu() {
 function handlePosSearchInput(value) {
   state.posSearch = value;
   render();
-  const el = document.getElementById('pos-search-input');
+  const el = document.getElementById('scan-input');
   if (el) { el.focus(); el.setSelectionRange(value.length, value.length); }
 }
 function setPosCategory(cat) {
@@ -553,17 +600,6 @@ function renderSidebar() {
 }
 
 /* ============ RENDER: POS ============ */
-function renderScanBar() {
-  const flashClass = state.scanFlash === 'ok' ? 'flash' : state.scanFlash === 'error' ? 'flash-error' : '';
-  return `
-  <div class="scan-bar ${flashClass}">
-    <span class="scan-icon">📷</span>
-    <input id="scan-input" type="text" inputmode="numeric" placeholder="Наведите сканер на штрихкод или введите код вручную и нажмите Enter"
-      autofocus
-      onkeydown="if(event.key==='Enter'){ event.preventDefault(); handleScanSubmit(this.value); }">
-    <span class="scan-hint">Поле активно — просто сканируйте</span>
-  </div>`;
-}
 function renderPOS() {
   const categories = [...new Set(state.products.map(p => p.category).filter(Boolean))].sort();
   const search = state.posSearch.trim().toLowerCase();
@@ -575,62 +611,222 @@ function renderPOS() {
 
   const products = filtered.map(p => {
     const inCart = state.cart.find(i => i.productId === p.id);
-    const available = p.stock - (inCart ? inCart.qty : 0);
-    const low = p.stock <= 5;
+    const consumption = unitConsumption(p);
+    const usedByCart = (inCart ? inCart.qty : 0) * consumption;
+    const availableVolume = Number(p.stock) - usedByCart;
+    const canAddOne = availableVolume + 1e-9 >= consumption;
+    const isDraft = p.unit === 'л';
+    const availableLabel = isDraft ? availableVolume.toFixed(2).replace(/\.?0+$/, '') + ' л' : Math.round(availableVolume) + ' шт';
+    const low = isDraft ? availableVolume <= Math.max(consumption * 2, 3) : p.stock <= 5;
     return `
-    <button class="product-card" ${available <= 0 ? 'disabled' : ''} onclick="addToCart(${p.id})">
-      <div class="card-media">
+    <button class="kassa-pcard" ${!canAddOne ? 'disabled' : ''} onclick="addToCart(${p.id})">
+      <div class="kassa-pcard-media">
         ${p.image_url ? `<img src="${esc(p.image_url)}" alt="${esc(p.name)}" loading="lazy">` : `<div class="placeholder">🍺</div>`}
       </div>
-      <div class="card-body">
-        <div class="product-name">${esc(p.name)}</div>
-        <div class="product-price">${fmt(p.price)}</div>
-        <div class="stock-badge ${low ? 'low' : ''}">Остаток: ${available}</div>
-        ${p.barcode ? `<div class="barcode-tag">${esc(p.barcode)}</div>` : ''}
-      </div>
+      <div class="kassa-pcard-name">${esc(p.name)}</div>
+      <div class="kassa-pcard-price">${fmt(p.price)}</div>
+      <div class="kassa-pcard-stock ${low ? 'low' : ''}">${availableLabel}</div>
     </button>`;
   }).join('');
 
   const chips = ['all', ...categories].map(c => `
-    <button class="chip ${state.posCategory === c ? 'active' : ''}" onclick="setPosCategory('${esc(c).replace(/'/g, "\\'")}')">${c === 'all' ? 'Все' : esc(c)}</button>
+    <button class="kassa-chip ${state.posCategory === c ? 'active' : ''}" onclick="setPosCategory('${esc(c).replace(/'/g, "\\'")}')">${c === 'all' ? 'Все' : esc(c)}</button>
   `).join('');
 
-  const cartItems = state.cart.length === 0
-    ? `<div class="cart-empty">Чек пуст.<br>Сканируйте штрихкод или выберите товар.</div>`
-    : state.cart.map(i => `
-      <div class="cart-item">
-        <div>
-          <div class="ci-name">${esc(i.name)}</div>
-          <div class="ci-price">${fmt(i.price)} × ${i.qty}</div>
-        </div>
-        <div class="qty-ctrl">
-          <button class="icon-btn" onclick="changeCartQty(${i.productId}, -1)" aria-label="Уменьшить">−</button>
-          <span>${i.qty}</span>
-          <button class="icon-btn" onclick="changeCartQty(${i.productId}, 1)" aria-label="Увеличить">+</button>
-        </div>
-      </div>`).join('');
+  const cartRows = state.cart.map((i, idx) => `
+    <tr>
+      <td class="kassa-col-num">${idx + 1}</td>
+      <td>${esc(i.name)}</td>
+      <td class="num">${fmt(i.price)}</td>
+      <td class="kassa-col-qty">
+        <button class="kassa-qty-btn" onclick="changeCartQty(${i.productId}, -1)" aria-label="Уменьшить">−</button>
+        <span>${i.qty}</span>
+        <button class="kassa-qty-btn" onclick="changeCartQty(${i.productId}, 1)" aria-label="Увеличить">+</button>
+      </td>
+      <td class="num kassa-col-sum">${fmt(i.price * i.qty)}</td>
+      <td class="kassa-col-remove"><button class="kassa-row-remove" onclick="changeCartQty(${i.productId}, -${i.qty})" aria-label="Убрать из чека">×</button></td>
+    </tr>`).join('');
+
+  const nextReceiptNo = state.receipts.length + 1;
+  const now = new Date();
+  const flashClass = state.scanFlash === 'ok' ? 'flash' : state.scanFlash === 'error' ? 'flash-error' : '';
 
   return `
-  ${renderScanBar()}
-  <div class="page-head">
-    <div><h2>Касса</h2><div class="page-sub">Сканируйте штрихкод, найдите по названию или нажмите на товар</div></div>
-  </div>
-  <div class="pos-toolbar">
-    <input id="pos-search-input" class="pos-search" type="text" placeholder="Поиск по названию…" value="${esc(state.posSearch)}" oninput="handlePosSearchInput(this.value)">
-  </div>
-  ${categories.length > 0 ? `<div class="category-chips">${chips}</div>` : ''}
-  <div class="pos-grid">
-    <div class="product-grid">${products || `<div class="empty-state">${state.products.length === 0 ? 'Нет товаров. Обратитесь к администратору.' : 'Ничего не найдено по заданным условиям.'}</div>`}</div>
-    <div class="cart-panel">
-      <h3>Текущий чек</h3>
-      ${cartItems}
-      <div class="cart-total-row">
-        <span class="label">Итого</span>
-        <span class="amount">${fmt(cartTotal())}</span>
+  <div class="kassa-wrap">
+    <div class="kassa-topbar">
+      <div class="kassa-topbar-title">Касса</div>
+      <div class="kassa-topbar-meta">Чек № ${nextReceiptNo} &nbsp;·&nbsp; ${now.toLocaleDateString('ru-RU')} ${now.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' })}</div>
+    </div>
+
+    <div class="kassa-toolbar ${flashClass}">
+      <span class="kassa-search-icon">📷</span>
+      <input id="scan-input" class="kassa-search-input" type="text" inputmode="numeric"
+        placeholder="Поиск по товару или сканируйте штрихкод"
+        autofocus
+        onkeydown="if(event.key==='Enter'){ event.preventDefault(); handleScanSubmit(this.value); }"
+        oninput="handlePosSearchInput(this.value)"
+        value="${esc(state.posSearch)}">
+    </div>
+    ${categories.length > 0 ? `<div class="kassa-chips-row">${chips}</div>` : ''}
+
+    <div class="kassa-receipt-panel">
+      <table class="kassa-receipt-table">
+        <thead>
+          <tr><th class="kassa-col-num">#</th><th>Наименование</th><th>Цена</th><th class="kassa-col-qty">Количество</th><th class="kassa-col-sum">Сумма</th><th></th></tr>
+        </thead>
+        <tbody>${cartRows}</tbody>
+      </table>
+      ${state.cart.length === 0 ? `<div class="kassa-receipt-empty">Чек пуст — отсканируйте штрихкод или выберите товар ниже</div>` : ''}
+    </div>
+
+    <div class="kassa-products-panel">
+      <div class="kassa-pcard-grid">${products || `<div class="empty-state">${state.products.length === 0 ? 'Нет товаров. Обратитесь к администратору.' : 'Ничего не найдено по заданным условиям.'}</div>`}</div>
+    </div>
+
+    <div class="kassa-footer">
+      <div class="kassa-total-box">
+        <span class="kassa-total-label">Итого</span>
+        <span class="kassa-total-value">${fmt(cartTotal())}</span>
       </div>
-      <button class="btn btn-primary" style="width:100%; margin-top:10px;" ${state.cart.length === 0 ? 'disabled' : ''} onclick="checkout()">Оформить чек</button>
+      <div class="kassa-footer-actions">
+        <button class="kassa-btn-clear" ${state.cart.length === 0 ? 'disabled' : ''} onclick="clearCart()">Очистить</button>
+        <button class="kassa-btn-pay" ${state.cart.length === 0 ? 'disabled' : ''} onclick="openPaymentModal()">Оплата</button>
+      </div>
+    </div>
+  </div>
+  ${state.showPaymentModal ? renderPaymentModal() : ''}`;
+}
+function renderPaymentModal() {
+  const total = cartTotal();
+  const method = state.paymentMethod;
+  const received = Number(state.paymentReceived) || 0;
+  const change = received - total;
+  const cashPart = Number(state.paymentCashPart) || 0;
+  const qrPart = Number(state.paymentQrPart) || 0;
+  const mixedDiff = +(total - cashPart - qrPart).toFixed(2);
+
+  return `
+  <div class="modal-overlay" onclick="if(event.target===this) closePaymentModal()">
+    <div class="modal-card payment-modal">
+      <div class="modal-close-row"><button class="icon-btn" onclick="closePaymentModal()" aria-label="Закрыть">×</button></div>
+      <div class="payment-body">
+        <h3 class="add-product-title">Оплата чека</h3>
+        <div class="payment-total-row">
+          <span>К оплате</span>
+          <span class="payment-total-value">${fmt(total)}</span>
+        </div>
+
+        <div class="payment-method-tabs">
+          <button class="payment-tab ${method === 'cash' ? 'active' : ''}" onclick="setPaymentMethod('cash')">Наличные</button>
+          <button class="payment-tab ${method === 'qr' ? 'active' : ''}" onclick="setPaymentMethod('qr')">QR-код</button>
+          <button class="payment-tab ${method === 'mixed' ? 'active' : ''}" onclick="setPaymentMethod('mixed')">Смешанный</button>
+        </div>
+
+        ${method === 'cash' ? `
+        <div class="field">
+          <label>Получено наличными, ₸</label>
+          <input id="payment-received-input" type="number" min="0" step="1" placeholder="${Math.ceil(total)}" value="${state.paymentReceived}"
+            oninput="setPaymentReceived(this.value)" autofocus>
+        </div>
+        <div class="payment-change-row ${change < 0 ? 'negative' : ''}">
+          <span>Сдача</span>
+          <span>${fmt(Math.max(0, change))}</span>
+        </div>` : ''}
+
+        ${method === 'qr' ? `
+        <div class="payment-qr-hint">Покажите покупателю QR-код для оплаты на терминале. Сумма к оплате — ${fmt(total)}.</div>` : ''}
+
+        ${method === 'mixed' ? `
+        <div class="payment-mixed-grid">
+          <div class="field">
+            <label>Наличными, ₸</label>
+            <input id="payment-cash-input" type="number" min="0" step="1" value="${state.paymentCashPart}" oninput="setPaymentMixedPart('cash', this.value)">
+            <button type="button" class="btn btn-ghost btn-sm" style="margin-top:6px;" onclick="fillMixedRest('cash')">Заполнить остаток</button>
+          </div>
+          <div class="field">
+            <label>По QR, ₸</label>
+            <input id="payment-qr-input" type="number" min="0" step="1" value="${state.paymentQrPart}" oninput="setPaymentMixedPart('qr', this.value)">
+            <button type="button" class="btn btn-ghost btn-sm" style="margin-top:6px;" onclick="fillMixedRest('qr')">Заполнить остаток</button>
+          </div>
+        </div>
+        <div class="payment-change-row ${Math.abs(mixedDiff) > 0.01 ? 'negative' : ''}">
+          <span>${mixedDiff > 0 ? 'Не хватает' : mixedDiff < 0 ? 'Лишнее' : 'Сходится'}</span>
+          <span>${fmt(Math.abs(mixedDiff))}</span>
+        </div>` : ''}
+      </div>
+      <div class="receipt-actions">
+        <button class="btn btn-ghost" style="flex:1;" onclick="closePaymentModal()">Отмена</button>
+        <button class="kassa-btn-pay" style="flex:1;" onclick="confirmPayment()">Подтвердить</button>
+      </div>
     </div>
   </div>`;
+}
+function clearCart() {
+  if (state.cart.length === 0) return;
+  if (!confirm('Очистить текущий чек?')) return;
+  state.cart = [];
+  render();
+  focusScanInput();
+}
+
+/* ============ ОПЛАТА ============ */
+function openPaymentModal() {
+  if (state.cart.length === 0) return;
+  state.showPaymentModal = true;
+  state.paymentMethod = 'cash';
+  state.paymentReceived = '';
+  state.paymentCashPart = '';
+  state.paymentQrPart = '';
+  render();
+}
+function closePaymentModal() {
+  state.showPaymentModal = false;
+  render();
+  focusScanInput();
+}
+function setPaymentMethod(method) {
+  state.paymentMethod = method;
+  render();
+}
+function setPaymentReceived(value) {
+  state.paymentReceived = value;
+  render();
+  const el = document.getElementById('payment-received-input');
+  if (el) { el.focus(); el.setSelectionRange(value.length, value.length); }
+}
+function setPaymentMixedPart(field, value) {
+  if (field === 'cash') state.paymentCashPart = value;
+  else state.paymentQrPart = value;
+  render();
+  const el = document.getElementById(field === 'cash' ? 'payment-cash-input' : 'payment-qr-input');
+  if (el) { el.focus(); el.setSelectionRange(value.length, value.length); }
+}
+function fillMixedRest(field) {
+  const total = cartTotal();
+  if (field === 'cash') {
+    const qr = Number(state.paymentQrPart) || 0;
+    state.paymentCashPart = String(Math.max(0, +(total - qr).toFixed(2)));
+  } else {
+    const cash = Number(state.paymentCashPart) || 0;
+    state.paymentQrPart = String(Math.max(0, +(total - cash).toFixed(2)));
+  }
+  render();
+}
+function confirmPayment() {
+  const total = cartTotal();
+  const method = state.paymentMethod;
+  if (method === 'cash') {
+    const received = Number(state.paymentReceived) || 0;
+    if (received < total - 0.01) { showToast('Получено меньше суммы чека'); return; }
+    checkout({ payment_method: 'cash', cash_amount: total, qr_amount: 0, received_amount: received });
+  } else if (method === 'qr') {
+    checkout({ payment_method: 'qr', cash_amount: 0, qr_amount: total, received_amount: null });
+  } else {
+    const cash = Number(state.paymentCashPart) || 0;
+    const qr = Number(state.paymentQrPart) || 0;
+    if (Math.abs(cash + qr - total) > 0.01) { showToast('Сумма наличными и по QR должна совпадать с итогом'); return; }
+    checkout({ payment_method: 'mixed', cash_amount: cash, qr_amount: qr, received_amount: cash });
+  }
 }
 
 /* ============ RENDER: PRODUCTS ============ */
@@ -648,17 +844,17 @@ function renderProducts() {
     if (!isAdmin) {
       // Кассиру доступен только просмотр — без редактирования и удаления
       return `
-      <tr class="${p.stock <= 5 ? 'low-row' : ''}">
+      <tr class="${isLowStock(p) ? 'low-row' : ''}">
         <td style="width:60px;">${p.image_url ? `<img src="${esc(p.image_url)}" class="thumb-img" alt="">` : `<div class="thumb-placeholder">🍺</div>`}</td>
         <td>${esc(p.name)}</td>
         <td>${esc(p.category || '—')}</td>
         <td class="mono">${esc(p.barcode || '—')}</td>
         <td class="num">${fmt(p.price)}</td>
-        <td class="num">${p.stock}</td>
+        <td class="num">${p.stock} ${p.unit === 'л' ? 'л' : ''}</td>
       </tr>`;
     }
     return `
-    <tr class="${p.stock <= 5 ? 'low-row' : ''}">
+    <tr class="${isLowStock(p) ? 'low-row' : ''}">
       <td style="width:120px;">
         <div class="thumb-cell">
           ${p.image_url ? `<img src="${esc(p.image_url)}" class="thumb-img" alt="">` : `<div class="thumb-placeholder">🍺</div>`}
@@ -680,8 +876,15 @@ function renderProducts() {
       </td>
       <td style="width:150px;"><input type="text" class="mono" value="${esc(p.barcode || '')}" placeholder="—" onchange="updateProduct(${p.id},'barcode', this.value)"></td>
       <td style="width:110px;"><input class="num" type="number" min="0" step="0.01" value="${p.cost_price || 0}" onchange="updateProduct(${p.id},'cost_price', this.value)"></td>
+      <td style="width:90px;">
+        <select onchange="updateProduct(${p.id},'unit', this.value)">
+          <option value="шт" ${p.unit !== 'л' ? 'selected' : ''}>шт</option>
+          <option value="л" ${p.unit === 'л' ? 'selected' : ''}>л</option>
+        </select>
+      </td>
+      <td style="width:110px;">${p.unit === 'л' ? `<input class="num" type="number" min="0" step="0.1" value="${p.volume_liters || 1}" onchange="updateProduct(${p.id},'volume_liters', this.value)">` : '<span class="pec-label" style="margin:0;">—</span>'}</td>
       <td style="width:120px;"><input class="num" type="number" min="0" step="0.01" value="${p.price}" onchange="updateProduct(${p.id},'price', this.value)"></td>
-      <td style="width:100px;"><input class="num" type="number" min="0" value="${p.stock}" onchange="updateProduct(${p.id},'stock', this.value)"></td>
+      <td style="width:100px;"><input class="num" type="number" min="0" step="0.01" value="${p.stock}" onchange="updateProduct(${p.id},'stock', this.value)"> ${p.unit === 'л' ? '<span class="pec-label" style="margin:0;">л</span>' : ''}</td>
       <td style="width:60px;"><button class="btn btn-danger btn-sm" onclick="deleteProduct(${p.id})">Удалить</button></td>
     </tr>`;
   }).join('');
@@ -691,9 +894,10 @@ function renderProducts() {
     const photoBlock = p.image_url
       ? `<img src="${esc(p.image_url)}" class="thumb-img" alt="">`
       : `<div class="thumb-placeholder">🍺</div>`;
+    const isDraft = p.unit === 'л';
     if (!isAdmin) {
       return `
-      <div class="product-view-card ${p.stock <= 5 ? 'low' : ''}">
+      <div class="product-view-card ${isLowStock(p) ? 'low' : ''}">
         <div class="pvc-top">
           ${photoBlock}
           <div class="pvc-name">${esc(p.name)}</div>
@@ -701,11 +905,11 @@ function renderProducts() {
         <div class="pvc-row"><span>Категория</span><span>${esc(p.category || '—')}</span></div>
         <div class="pvc-row"><span>Штрихкод</span><span class="mono">${esc(p.barcode || '—')}</span></div>
         <div class="pvc-row"><span>Цена</span><span class="num">${fmt(p.price)}</span></div>
-        <div class="pvc-row"><span>Остаток</span><span class="num">${p.stock}</span></div>
+        <div class="pvc-row"><span>Остаток</span><span class="num">${p.stock} ${isDraft ? 'л' : 'шт'}</span></div>
       </div>`;
     }
     return `
-    <div class="product-edit-card ${p.stock <= 5 ? 'low' : ''}">
+    <div class="product-edit-card ${isLowStock(p) ? 'low' : ''}">
       <div class="pec-head">
         <div class="thumb-cell">
           ${photoBlock}
@@ -730,9 +934,17 @@ function renderProducts() {
         <div><label class="pec-label">Штрихкод</label><input type="text" class="mono" value="${esc(p.barcode || '')}" placeholder="—" onchange="updateProduct(${p.id},'barcode', this.value)"></div>
         <div><label class="pec-label">Себестоимость, ₸</label><input class="num" type="number" min="0" step="0.01" value="${p.cost_price || 0}" onchange="updateProduct(${p.id},'cost_price', this.value)"></div>
       </div>
+      <label class="pec-label">Единица товара</label>
+      <div class="pec-grid-2">
+        <select onchange="updateProduct(${p.id},'unit', this.value)">
+          <option value="шт" ${!isDraft ? 'selected' : ''}>Штуки (шт)</option>
+          <option value="л" ${isDraft ? 'selected' : ''}>Разливное (л)</option>
+        </select>
+        ${isDraft ? `<input class="num" type="number" min="0" step="0.1" value="${p.volume_liters || 1}" placeholder="Объём порции, л" onchange="updateProduct(${p.id},'volume_liters', this.value)">` : ''}
+      </div>
       <div class="pec-grid-2">
         <div><label class="pec-label">Цена, ₸</label><input class="num" type="number" min="0" step="0.01" value="${p.price}" onchange="updateProduct(${p.id},'price', this.value)"></div>
-        <div><label class="pec-label">Остаток</label><input class="num" type="number" min="0" value="${p.stock}" onchange="updateProduct(${p.id},'stock', this.value)"></div>
+        <div><label class="pec-label">Остаток${isDraft ? ', л' : ''}</label><input class="num" type="number" min="0" step="${isDraft ? '0.1' : '1'}" value="${p.stock}" onchange="updateProduct(${p.id},'stock', this.value)"></div>
       </div>
     </div>`;
   }).join('');
@@ -786,7 +998,7 @@ function renderProducts() {
       </div>
     </div>
     <table class="products-table">
-      <thead><tr><th>Фото</th><th>Название</th><th>Категория</th><th>Штрихкод</th>${isAdmin ? '<th>Себестоимость</th>' : ''}<th>Цена, ₸</th><th>Остаток</th>${isAdmin ? '<th></th>' : ''}</tr></thead>
+      <thead><tr><th>Фото</th><th>Название</th><th>Категория</th><th>Штрихкод</th>${isAdmin ? '<th>Себестоимость</th><th>Ед.</th><th>Объём порции</th>' : ''}<th>Цена, ₸</th><th>Остаток</th>${isAdmin ? '<th></th>' : ''}</tr></thead>
       <tbody>${rows || ''}</tbody>
     </table>
     <div class="products-cards">${cards || ''}</div>
@@ -817,8 +1029,19 @@ function renderAddProductModal(newProductCategoryOptions, isAdmin) {
         </div>
         <div class="field"><label>Штрихкод</label><input id="new-p-barcode" type="text" placeholder="Скан. или вручную"></div>
         ${isAdmin ? `<div class="field"><label>Себестоимость, ₸</label><input id="new-p-cost" type="number" min="0" placeholder="300"></div>` : ''}
+        <div class="field">
+          <label>Единица товара</label>
+          <select id="new-p-unit" onchange="toggleDraftFieldsInModal()">
+            <option value="шт" selected>Штуки (шт)</option>
+            <option value="л">Разливное (л)</option>
+          </select>
+        </div>
+        <div class="field" id="new-p-volume-wrap" style="display:none;">
+          <label>Объём порции, л</label>
+          <input id="new-p-volume" type="number" min="0" step="0.1" placeholder="1.5">
+        </div>
         <div class="field"><label>Цена, ₸</label><input id="new-p-price" type="number" min="0" placeholder="500"></div>
-        <div class="field"><label>Остаток</label><input id="new-p-stock" type="number" min="0" placeholder="20"></div>
+        <div class="field"><label id="new-p-stock-label">Остаток</label><input id="new-p-stock" type="number" min="0" step="1" placeholder="20"></div>
       </div>
       <div class="receipt-actions">
         <button class="btn btn-ghost" style="flex:1;" onclick="closeAddProductModal()">Отмена</button>
@@ -845,6 +1068,7 @@ function renderHistory() {
       <td class="num">№${r.id}</td>
       <td>${fmtDate(r.created_at)}</td>
       <td>${esc(r.cashier_name)}</td>
+      <td>${paymentMethodLabelShort(r)}</td>
       <td class="num">${fmt(r.total)}</td>
       <td class="row-actions">
         <button class="btn btn-ghost btn-sm" onclick="openReceipt(${r.id})">Открыть</button>
@@ -869,7 +1093,7 @@ function renderHistory() {
       </div>
     </div>` : ''}
     <table>
-      <thead><tr><th>Чек</th><th>Дата</th><th>Кассир</th><th>Сумма</th><th></th></tr></thead>
+      <thead><tr><th>Чек</th><th>Дата</th><th>Кассир</th><th>Оплата</th><th>Сумма</th><th></th></tr></thead>
       <tbody>${rows}</tbody>
     </table>
     ${list.length === 0 ? '<div class="empty-state">Чеков пока нет.</div>' : ''}
@@ -993,6 +1217,16 @@ function renderUsers() {
 }
 
 /* ============ RENDER: RECEIPT MODAL ============ */
+function paymentMethodLabel(r) {
+  if (r.payment_method === 'qr') return 'QR-код';
+  if (r.payment_method === 'mixed') return `Смешанный (нал. ${fmt(r.cash_amount)} + QR ${fmt(r.qr_amount)})`;
+  return 'Наличные';
+}
+function paymentMethodLabelShort(r) {
+  if (r.payment_method === 'qr') return 'QR';
+  if (r.payment_method === 'mixed') return 'Смеш.';
+  return 'Нал.';
+}
 function renderReceiptModal() {
   const r = state.receiptToShow;
   if (!r) return '';
@@ -1002,6 +1236,7 @@ function renderReceiptModal() {
       <span>${esc(i.product_name || i.name)}</span>
       <span class="qp">${i.qty} × ${fmt(i.price)}</span>
     </div>`).join('');
+  const changeDue = r.payment_method !== 'qr' && r.received_amount != null ? Number(r.received_amount) - Number(r.total) : 0;
   return `
   <div class="modal-overlay" onclick="if(event.target===this) closeReceiptModal()">
     <div class="modal-card">
@@ -1013,6 +1248,8 @@ function renderReceiptModal() {
         </div>
         ${lines}
         <div class="receipt-total"><span>Итого</span><span>${fmt(r.total)}</span></div>
+        <div class="receipt-line"><span>Оплата</span><span class="qp">${paymentMethodLabel(r)}</span></div>
+        ${changeDue > 0.01 ? `<div class="receipt-line"><span>Сдача</span><span class="qp">${fmt(changeDue)}</span></div>` : ''}
         <div class="receipt-foot">Спасибо за покупку!</div>
       </div>
       <div class="receipt-actions">
@@ -1041,12 +1278,12 @@ function render() {
   app.innerHTML = `
     <div class="shell">
       ${renderSidebar()}
-      <main class="content">${viewHtml}</main>
+      <main class="content ${state.view === 'pos' ? 'content-wide' : ''}">${viewHtml}</main>
     </div>
     ${renderReceiptModal()}
     ${state.toast ? `<div class="toast">${esc(state.toast)}</div>` : ''}
   `;
-  if (state.view === 'pos' && !state.receiptToShow) focusScanInput();
+  if (state.view === 'pos' && !state.receiptToShow && !state.showPaymentModal) focusScanInput();
   if (state.view === 'analytics') renderAnalyticsChart();
 }
 

@@ -16,7 +16,9 @@ CREATE TABLE IF NOT EXISTS products (
   category VARCHAR(100) NOT NULL DEFAULT 'Пиво',
   price NUMERIC(10,2) NOT NULL CHECK (price >= 0),
   cost_price NUMERIC(10,2) NOT NULL DEFAULT 0 CHECK (cost_price >= 0),
-  stock INTEGER NOT NULL DEFAULT 0 CHECK (stock >= 0),
+  stock NUMERIC(10,2) NOT NULL DEFAULT 0 CHECK (stock >= 0),
+  unit VARCHAR(10) NOT NULL DEFAULT 'шт',
+  volume_liters NUMERIC(6,2),
   image_url TEXT,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -25,6 +27,10 @@ CREATE TABLE IF NOT EXISTS products (
 ALTER TABLE products ADD COLUMN IF NOT EXISTS image_url TEXT;
 ALTER TABLE products ADD COLUMN IF NOT EXISTS category VARCHAR(100) NOT NULL DEFAULT 'Пиво';
 ALTER TABLE products ADD COLUMN IF NOT EXISTS cost_price NUMERIC(10,2) NOT NULL DEFAULT 0;
+ALTER TABLE products ADD COLUMN IF NOT EXISTS unit VARCHAR(10) NOT NULL DEFAULT 'шт';
+ALTER TABLE products ADD COLUMN IF NOT EXISTS volume_liters NUMERIC(6,2);
+-- Остаток разливного считается в литрах (дробное число) — расширяем тип столбца
+ALTER TABLE products ALTER COLUMN stock TYPE NUMERIC(10,2) USING stock::numeric;
 CREATE INDEX IF NOT EXISTS idx_products_barcode ON products(barcode);
 CREATE INDEX IF NOT EXISTS idx_products_category ON products(category);
 
@@ -40,11 +46,19 @@ CREATE TABLE IF NOT EXISTS receipts (
   cashier_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
   cashier_name VARCHAR(100) NOT NULL,
   total NUMERIC(10,2) NOT NULL,
+  payment_method VARCHAR(20) NOT NULL DEFAULT 'cash',
+  cash_amount NUMERIC(10,2) NOT NULL DEFAULT 0,
+  qr_amount NUMERIC(10,2) NOT NULL DEFAULT 0,
+  received_amount NUMERIC(10,2),
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   deleted_at TIMESTAMPTZ
 );
--- На случай, если таблица создавалась раньше без этой колонки
+-- На случай, если таблица создавалась раньше без этих колонок
 ALTER TABLE receipts ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ;
+ALTER TABLE receipts ADD COLUMN IF NOT EXISTS payment_method VARCHAR(20) NOT NULL DEFAULT 'cash';
+ALTER TABLE receipts ADD COLUMN IF NOT EXISTS cash_amount NUMERIC(10,2) NOT NULL DEFAULT 0;
+ALTER TABLE receipts ADD COLUMN IF NOT EXISTS qr_amount NUMERIC(10,2) NOT NULL DEFAULT 0;
+ALTER TABLE receipts ADD COLUMN IF NOT EXISTS received_amount NUMERIC(10,2);
 CREATE INDEX IF NOT EXISTS idx_receipts_created_at ON receipts(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_receipts_cashier ON receipts(cashier_id);
 CREATE INDEX IF NOT EXISTS idx_receipts_deleted_at ON receipts(deleted_at);
