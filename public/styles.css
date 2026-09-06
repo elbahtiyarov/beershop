@@ -176,12 +176,15 @@ td input, td select{ padding:6px 8px; border-radius:6px; border:1px solid var(--
 .thumb-placeholder{ width:44px; height:44px; border-radius:8px; background: var(--surface-alt); border:1px solid var(--border); display:flex; align-items:center; justify-content:center; font-size:1.2rem; }
 .thumb-remove{ font-size:0.7rem; color: var(--danger); background:none; border:none; padding:0; text-decoration:underline; cursor:pointer; }
 
-.cat-manage-list{ display:flex; flex-direction:column; gap:6px; }
-.cat-manage-row{ display:flex; align-items:center; gap:10px; padding:8px 10px; border-radius:8px; background: var(--surface-alt); flex-wrap:wrap; }
-.cat-manage-name{ font-weight:600; font-size:0.88rem; min-width:120px; }
-.cat-manage-count{ font-size:0.76rem; color: var(--ink-soft); margin-right:auto; }
+.cat-manage-list{ display:flex; flex-direction:column; gap:8px; }
+.cat-manage-row{ display:flex; align-items:center; justify-content:space-between; gap:12px; padding:10px 12px; border-radius:8px; background: var(--surface-alt); flex-wrap:wrap; }
+.cat-manage-title{ display:flex; align-items:baseline; gap:10px; min-width:140px; }
+.cat-manage-name{ font-weight:600; font-size:0.9rem; }
+.cat-manage-count{ font-size:0.76rem; color: var(--ink-soft); white-space:nowrap; }
+.cat-manage-actions{ display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin-left:auto; }
+.cat-manage-buttons{ display:flex; gap:8px; }
 .cat-markup-cell{ display:flex; align-items:center; gap:6px; font-size:0.82rem; color: var(--ink-soft); }
-.cat-markup-cell input{ padding:6px 8px; border-radius:6px; border:1px solid var(--border); background:var(--surface); font-size:0.85rem; }
+.cat-markup-cell input{ width:64px; padding:6px 8px; border-radius:6px; border:1px solid var(--border); background:var(--surface); font-size:0.85rem; }
 
 .stats-grid{ display:grid; grid-template-columns: repeat(auto-fit, minmax(160px,1fr)); gap:12px; }
 .stat-card{ background: var(--surface); border:1px solid var(--border); border-radius: var(--radius); padding:16px; }
@@ -189,6 +192,43 @@ td input, td select{ padding:6px 8px; border-radius:6px; border:1px solid var(--
 .stat-label{ font-size:0.76rem; color: var(--ink-soft); text-transform:uppercase; letter-spacing:0.03em; font-weight:600; margin-bottom:6px; }
 .stat-value{ font-family:'JetBrains Mono',monospace; font-size:1.3rem; font-weight:700; color: var(--ink); }
 .chart-wrap{ position:relative; height:260px; margin-top:10px; }
+
+/* Карточный режим для товаров (планшеты/моноблоки/телефоны) — по умолчанию скрыт, показывается по медиа-запросу */
+.products-cards{ display:none; flex-direction:column; gap:12px; }
+.product-edit-card, .product-view-card{
+  background: var(--surface); border:1px solid var(--border); border-radius: var(--radius);
+  padding:14px; display:flex; flex-direction:column; gap:8px;
+}
+.product-edit-card.low, .product-view-card.low{ background: var(--danger-bg); border-color: #e0b3ac; }
+.pec-head{ display:flex; align-items:flex-start; justify-content:space-between; gap:10px; }
+.pec-label{ font-size:0.72rem; font-weight:600; color: var(--ink-soft); text-transform:uppercase; letter-spacing:0.03em; margin-bottom:-4px; }
+.pec-inline{ display:flex; gap:8px; align-items:center; }
+.pec-inline select{ flex:1; }
+.pec-grid-2{ display:grid; grid-template-columns: 1fr 1fr; gap:10px; }
+.pec-grid-2 input{ width:100%; }
+.product-edit-card input, .product-edit-card select{ padding:10px 12px; border-radius:8px; border:1px solid var(--border); background:var(--surface-alt); font-size:0.92rem; width:100%; }
+
+.pvc-top{ display:flex; align-items:center; gap:12px; }
+.pvc-top .thumb-img, .pvc-top .thumb-placeholder{ width:52px; height:52px; }
+.pvc-name{ font-weight:700; font-size:1rem; }
+.pvc-row{ display:flex; justify-content:space-between; align-items:center; padding:6px 0; border-top:1px dashed var(--border); font-size:0.88rem; }
+.pvc-row span:first-child{ color: var(--ink-soft); }
+
+/* Плавающая кнопка добавления товара */
+.fab{
+  position: fixed; right: 24px; bottom: 24px; width:56px; height:56px; border-radius:50%;
+  background: var(--amber); color:#fff; font-size:1.8rem; font-weight:700; line-height:1;
+  display:flex; align-items:center; justify-content:center; border:none; cursor:pointer;
+  box-shadow: 0 10px 24px rgba(42,33,24,0.3); z-index:15;
+  transition: transform .12s ease, box-shadow .12s ease;
+}
+.fab:hover{ background: var(--amber-dark); transform: translateY(-2px); }
+.fab:active{ transform: translateY(0); }
+
+.add-product-modal{ max-width: 440px; }
+.add-product-title{ font-size:1.15rem; margin: 2px 0 14px; text-transform:none; }
+.add-product-body{ padding: 0 22px 6px; max-height: 62vh; overflow-y:auto; }
+.add-product-body .field:last-child{ margin-bottom:0; }
 
 .modal-overlay{ position:fixed; inset:0; background: rgba(42,33,24,0.5); display:flex; align-items:center; justify-content:center; padding:20px; z-index:50; }
 .modal-card{ background:#fff; border-radius:14px; max-width: 420px; width:100%; max-height:88vh; overflow-y:auto; box-shadow: 0 30px 60px rgba(0,0,0,0.25); }
@@ -276,6 +316,12 @@ td input, td select{ padding:6px 8px; border-radius:6px; border:1px solid var(--
   .product-grid{ grid-template-columns: repeat(auto-fill, minmax(150px,1fr)); }
 }
 
+/* Таблица товаров нечитаема на узких/средних экранах — переключаемся на карточки */
+@media (max-width: 900px){
+  .products-table{ display:none; }
+  .products-cards{ display:flex; }
+}
+
 /* Крупные моноблоки и широкие мониторы: чуть просторнее карточки и не растягиваем контент бесконечно */
 @media (min-width: 1440px){
   .content{ max-width: 1320px; padding: 32px 40px; }
@@ -286,6 +332,7 @@ td input, td select{ padding:6px 8px; border-radius:6px; border:1px solid var(--
 @supports (padding: max(0px)){
   .content{ padding-left: max(16px, env(safe-area-inset-left)); padding-right: max(16px, env(safe-area-inset-right)); }
   .sidebar{ padding-left: max(16px, env(safe-area-inset-left)); padding-right: max(16px, env(safe-area-inset-right)); }
+  .fab{ right: max(24px, calc(env(safe-area-inset-right) + 16px)); bottom: max(24px, calc(env(safe-area-inset-bottom) + 16px)); }
 }
 
 /* Устройства без наведения курсора (тач-экраны) — убираем hover-эффекты, которые "залипают" после тапа */
@@ -293,4 +340,36 @@ td input, td select{ padding:6px 8px; border-radius:6px; border:1px solid var(--
   .product-card:hover:not(:disabled){ transform: none; box-shadow: none; }
   .chip:hover{ background: var(--surface); }
   .btn-ghost:hover{ background: transparent; }
+}
+
+/* Категории и наценка, показатели — под телефон (узкие экраны) */
+@media (max-width: 640px){
+  .cat-manage-row{ flex-direction:column; align-items:stretch; gap:10px; }
+  .cat-manage-title{ justify-content:space-between; min-width:0; }
+  .cat-manage-actions{ margin-left:0; justify-content:space-between; width:100%; }
+  .cat-markup-cell{ flex:1; }
+  .cat-markup-cell input{ flex:1; min-width:0; }
+  .cat-manage-buttons{ width:100%; }
+  .cat-manage-buttons .btn{ flex:1; }
+  .stats-grid{ grid-template-columns: repeat(2, 1fr); }
+  .stat-card{ padding:12px; }
+  .stat-value{ font-size:1.1rem; }
+  .chart-wrap{ height:200px; }
+}
+@media (max-width: 380px){
+  .stats-grid{ grid-template-columns: 1fr 1fr; }
+  .stat-value{ font-size:1rem; }
+  .pec-grid-2{ grid-template-columns: 1fr; }
+}
+
+/* Любые сенсорные экраны (в т.ч. моноблоки-кассы с тачскрином на широком мониторе) —
+   крупнее зоны нажатия независимо от ширины экрана */
+@media (pointer: coarse){
+  .btn{ min-height: 42px; }
+  .btn-sm{ min-height: 36px; padding: 7px 12px; }
+  .icon-btn{ width: 38px; height: 38px; }
+  .cat-markup-cell input, td input, td select{ min-height: 36px; }
+  .nav-item{ min-height: 42px; }
+  .chip{ min-height: 38px; }
+  select, input[type="number"], input[type="text"]{ min-height: 40px; }
 }

@@ -23,6 +23,7 @@ let state = {
   productsSearch: '',
   posCategoryAdmin: 'all',
   mobileMenuOpen: false,
+  showAddProductModal: false,
   categoryMarkups: {},
   analyticsData: null,
   analyticsPeriodDays: 7,
@@ -325,8 +326,20 @@ async function addProduct() {
   try {
     const created = await api('/products', { method: 'POST', body: { name, price, stock: stock || 0, barcode: barcode || null, category: category || 'Пиво', cost_price: costPrice } });
     state.products.push(created);
+    state.showAddProductModal = false;
     render();
+    showToast('Товар добавлен');
   } catch (err) { showToast(err.message); }
+}
+function openAddProductModal() {
+  state.showAddProductModal = true;
+  render();
+  const el = document.getElementById('new-p-name');
+  if (el) el.focus();
+}
+function closeAddProductModal() {
+  state.showAddProductModal = false;
+  render();
 }
 
 /* ============ КАТЕГОРИИ: НАЦЕНКА ============ */
@@ -495,7 +508,9 @@ function renderLogin() {
         <button type="submit" class="btn btn-primary" style="width:100%;">Войти</button>
       </form>
       <div class="demo-hint">
-        
+        Демо-доступ (смените после установки):<br>
+        Админ — <b>admin</b> / <b>admin123</b><br>
+        Кассир — <b>kassir</b> / <b>kassir123</b>
       </div>
     </div>
   </div>`;
@@ -671,6 +686,57 @@ function renderProducts() {
     </tr>`;
   }).join('');
 
+  /* Карточный вид для планшетов, моноблоков и телефонов — вместо тесной таблицы */
+  const cards = filtered.map(p => {
+    const photoBlock = p.image_url
+      ? `<img src="${esc(p.image_url)}" class="thumb-img" alt="">`
+      : `<div class="thumb-placeholder">🍺</div>`;
+    if (!isAdmin) {
+      return `
+      <div class="product-view-card ${p.stock <= 5 ? 'low' : ''}">
+        <div class="pvc-top">
+          ${photoBlock}
+          <div class="pvc-name">${esc(p.name)}</div>
+        </div>
+        <div class="pvc-row"><span>Категория</span><span>${esc(p.category || '—')}</span></div>
+        <div class="pvc-row"><span>Штрихкод</span><span class="mono">${esc(p.barcode || '—')}</span></div>
+        <div class="pvc-row"><span>Цена</span><span class="num">${fmt(p.price)}</span></div>
+        <div class="pvc-row"><span>Остаток</span><span class="num">${p.stock}</span></div>
+      </div>`;
+    }
+    return `
+    <div class="product-edit-card ${p.stock <= 5 ? 'low' : ''}">
+      <div class="pec-head">
+        <div class="thumb-cell">
+          ${photoBlock}
+          <div style="display:flex; flex-direction:column; gap:2px;">
+            <input type="file" accept="image/*" id="img-input-card-${p.id}" style="display:none" onchange="uploadProductImage(${p.id}, this.files[0])">
+            <button class="btn btn-ghost btn-sm" onclick="document.getElementById('img-input-card-${p.id}').click()">Фото</button>
+            ${p.image_url ? `<button class="thumb-remove" onclick="removeProductImage(${p.id})">убрать</button>` : ''}
+          </div>
+        </div>
+        <button class="btn btn-danger btn-sm" onclick="deleteProduct(${p.id})">Удалить</button>
+      </div>
+      <label class="pec-label">Название</label>
+      <input type="text" value="${esc(p.name)}" onchange="updateProduct(${p.id},'name', this.value)">
+      <label class="pec-label">Категория</label>
+      <div class="pec-inline">
+        <select onchange="updateProduct(${p.id},'category', this.value)">
+          ${categories.map(c => `<option value="${esc(c)}" ${p.category === c ? 'selected' : ''}>${esc(c)}</option>`).join('')}
+        </select>
+        <button type="button" class="icon-btn" title="Новая категория" onclick="addCategoryOptionForRow(${p.id}, this)">+</button>
+      </div>
+      <div class="pec-grid-2">
+        <div><label class="pec-label">Штрихкод</label><input type="text" class="mono" value="${esc(p.barcode || '')}" placeholder="—" onchange="updateProduct(${p.id},'barcode', this.value)"></div>
+        <div><label class="pec-label">Себестоимость, ₸</label><input class="num" type="number" min="0" step="0.01" value="${p.cost_price || 0}" onchange="updateProduct(${p.id},'cost_price', this.value)"></div>
+      </div>
+      <div class="pec-grid-2">
+        <div><label class="pec-label">Цена, ₸</label><input class="num" type="number" min="0" step="0.01" value="${p.price}" onchange="updateProduct(${p.id},'price', this.value)"></div>
+        <div><label class="pec-label">Остаток</label><input class="num" type="number" min="0" value="${p.stock}" onchange="updateProduct(${p.id},'stock', this.value)"></div>
+      </div>
+    </div>`;
+  }).join('');
+
   const categoryFilterOptions = categories.map(c => `<option value="${esc(c)}" ${state.posCategoryAdmin === c ? 'selected' : ''}>${esc(c)}</option>`).join('');
   const newProductCategoryOptions = categories.map(c => `<option value="${esc(c)}">${esc(c)}</option>`).join('') || `<option value="Пиво">Пиво</option>`;
 
@@ -679,17 +745,23 @@ function renderProducts() {
     const markup = state.categoryMarkups[c] !== undefined ? state.categoryMarkups[c] : '';
     return `
     <div class="cat-manage-row">
-      <span class="cat-manage-name">${esc(c)}</span>
-      <span class="cat-manage-count">${count} шт.</span>
-      ${isAdmin ? `
-      <div class="cat-markup-cell">
-        <input type="number" class="num" step="0.1" min="0" style="width:70px;" placeholder="0" value="${markup}"
-          onchange="updateCategoryMarkup('${esc(c).replace(/'/g, "\\'")}', this.value)">
-        <span>%</span>
-        <button class="btn btn-hop btn-sm" onclick="applyCategoryMarkup('${esc(c).replace(/'/g, "\\'")}')">Применить</button>
-      </div>` : ''}
-      <button class="btn btn-ghost btn-sm" onclick="renameCategory('${esc(c).replace(/'/g, "\\'")}')">Переименовать</button>
-      <button class="btn btn-danger btn-sm" onclick="deleteCategory('${esc(c).replace(/'/g, "\\'")}')">Удалить</button>
+      <div class="cat-manage-title">
+        <span class="cat-manage-name">${esc(c)}</span>
+        <span class="cat-manage-count">${count} шт.</span>
+      </div>
+      <div class="cat-manage-actions">
+        ${isAdmin ? `
+        <div class="cat-markup-cell">
+          <input type="number" class="num" step="0.1" min="0" placeholder="0" value="${markup}"
+            onchange="updateCategoryMarkup('${esc(c).replace(/'/g, "\\'")}', this.value)">
+          <span>%</span>
+          <button class="btn btn-hop btn-sm" onclick="applyCategoryMarkup('${esc(c).replace(/'/g, "\\'")}')">Применить</button>
+        </div>` : ''}
+        <div class="cat-manage-buttons">
+          <button class="btn btn-ghost btn-sm" onclick="renameCategory('${esc(c).replace(/'/g, "\\'")}')">Переименовать</button>
+          <button class="btn btn-danger btn-sm" onclick="deleteCategory('${esc(c).replace(/'/g, "\\'")}')">Удалить</button>
+        </div>
+      </div>
     </div>`;
   }).join('');
 
@@ -713,26 +785,45 @@ function renderProducts() {
         </select>
       </div>
     </div>
-    <table>
+    <table class="products-table">
       <thead><tr><th>Фото</th><th>Название</th><th>Категория</th><th>Штрихкод</th>${isAdmin ? '<th>Себестоимость</th>' : ''}<th>Цена, ₸</th><th>Остаток</th>${isAdmin ? '<th></th>' : ''}</tr></thead>
       <tbody>${rows || ''}</tbody>
     </table>
-    ${state.products.length === 0 ? '<div class="empty-state">Товаров пока нет — добавьте первый ниже.</div>' : ''}
+    <div class="products-cards">${cards || ''}</div>
+    ${state.products.length === 0 ? '<div class="empty-state">Товаров пока нет — нажмите «+», чтобы добавить первый.</div>' : ''}
     ${state.products.length > 0 && filtered.length === 0 ? '<div class="empty-state">Ничего не найдено по заданным условиям.</div>' : ''}
-    <div class="add-form">
-      <div class="field grow"><label>Название</label><input id="new-p-name" type="text" placeholder="Крафтовый эль 0.5л"></div>
-      <div class="field">
-        <label>Категория</label>
-        <div style="display:flex; gap:6px; align-items:center;">
-          <select id="new-p-category" style="min-width:120px;">${newProductCategoryOptions}</select>
-          <button type="button" class="icon-btn" title="Новая категория" onclick="addNewCategoryOption()">+</button>
+  </div>
+  <button class="fab" onclick="openAddProductModal()" aria-label="Добавить товар" title="Добавить товар">+</button>
+  ${state.showAddProductModal ? renderAddProductModal(newProductCategoryOptions, isAdmin) : ''}`;
+}
+
+function renderAddProductModal(newProductCategoryOptions, isAdmin) {
+  return `
+  <div class="modal-overlay" onclick="if(event.target===this) closeAddProductModal()">
+    <div class="modal-card add-product-modal">
+      <div class="modal-close-row"><button class="icon-btn" onclick="closeAddProductModal()" aria-label="Закрыть">×</button></div>
+      <div class="add-product-body">
+        <h3 class="add-product-title">Новый товар</h3>
+        <div class="field">
+          <label>Название</label>
+          <input id="new-p-name" type="text" placeholder="Крафтовый эль 0.5л">
         </div>
+        <div class="field">
+          <label>Категория</label>
+          <div style="display:flex; gap:6px; align-items:center;">
+            <select id="new-p-category" style="flex:1;">${newProductCategoryOptions}</select>
+            <button type="button" class="icon-btn" title="Новая категория" onclick="addNewCategoryOption()">+</button>
+          </div>
+        </div>
+        <div class="field"><label>Штрихкод</label><input id="new-p-barcode" type="text" placeholder="Скан. или вручную"></div>
+        ${isAdmin ? `<div class="field"><label>Себестоимость, ₸</label><input id="new-p-cost" type="number" min="0" placeholder="300"></div>` : ''}
+        <div class="field"><label>Цена, ₸</label><input id="new-p-price" type="number" min="0" placeholder="500"></div>
+        <div class="field"><label>Остаток</label><input id="new-p-stock" type="number" min="0" placeholder="20"></div>
       </div>
-      <div class="field"><label>Штрихкод</label><input id="new-p-barcode" type="text" placeholder="Скан. или вручную"></div>
-      ${isAdmin ? `<div class="field"><label>Себестоимость, ₸</label><input id="new-p-cost" type="number" min="0" placeholder="300"></div>` : ''}
-      <div class="field"><label>Цена, ₸</label><input id="new-p-price" type="number" min="0" placeholder="500"></div>
-      <div class="field"><label>Остаток</label><input id="new-p-stock" type="number" min="0" placeholder="20"></div>
-      <button class="btn btn-hop" onclick="addProduct()">Добавить товар</button>
+      <div class="receipt-actions">
+        <button class="btn btn-ghost" style="flex:1;" onclick="closeAddProductModal()">Отмена</button>
+        <button class="btn btn-hop" style="flex:1;" onclick="addProduct()">Добавить товар</button>
+      </div>
     </div>
   </div>`;
 }
