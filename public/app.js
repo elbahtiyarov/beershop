@@ -406,8 +406,6 @@ function renderLogin() {
       </form>
       <div class="demo-hint">
         Демо-доступ (смените после установки):<br>
-        Админ — <b>admin</b> / <b>admin123</b><br>
-        Кассир — <b>kassir</b> / <b>kassir123</b>
       </div>
     </div>
   </div>`;
