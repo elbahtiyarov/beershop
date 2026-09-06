@@ -22,6 +22,7 @@ let state = {
   posCategory: 'all',
   productsSearch: '',
   posCategoryAdmin: 'all',
+  mobileMenuOpen: false,
   toast: null,
   userFormError: '',
   scanFlash: '', // '', 'ok', 'error'
@@ -79,6 +80,7 @@ function logout(message) {
   state.cart = [];
   state.receiptToShow = null;
   state.view = 'pos';
+  state.mobileMenuOpen = false;
   localStorage.removeItem('beershop_token');
   localStorage.removeItem('beershop_user');
   render();
@@ -363,10 +365,15 @@ async function updateUserField(id, field, value) {
 /* ============ NAV ============ */
 async function setView(v) {
   state.view = v;
+  state.mobileMenuOpen = false;
   if (v === 'users' && state.currentUser.role === 'admin') await loadUsers();
   if (v === 'trash' && state.currentUser.role === 'admin') await loadTrash();
   render();
   if (v === 'pos') focusScanInput();
+}
+function toggleMobileMenu() {
+  state.mobileMenuOpen = !state.mobileMenuOpen;
+  render();
 }
 function handlePosSearchInput(value) {
   state.posSearch = value;
@@ -406,6 +413,8 @@ function renderLogin() {
       </form>
       <div class="demo-hint">
         Демо-доступ (смените после установки):<br>
+        Админ — <b>admin</b> / <b>admin123</b><br>
+        Кассир — <b>kassir</b> / <b>kassir123</b>
       </div>
     </div>
   </div>`;
@@ -426,17 +435,23 @@ function renderSidebar() {
   `).join('');
   return `
   <aside class="sidebar">
-    <div class="logo-row">${LOGO_SVG}<h1>Хмель</h1></div>
-    <p class="tagline">Учёт и касса</p>
-    ${items}
-    <div class="sidebar-spacer"></div>
-    <div class="user-box">
-      <div>
-        <div class="who">${esc(state.currentUser.name)}</div>
-        <span class="badge ${state.currentUser.role === 'admin' ? 'badge-admin' : 'badge-cashier'}">${state.currentUser.role === 'admin' ? 'Админ' : 'Кассир'}</span>
-      </div>
-      <button class="btn btn-ghost btn-sm" style="margin-left:auto;" onclick="logout()">Выйти</button>
+    <div class="sidebar-top">
+      <div class="logo-row">${LOGO_SVG}<h1>Хмель</h1></div>
+      <button class="burger-btn" onclick="toggleMobileMenu()" aria-label="${state.mobileMenuOpen ? 'Закрыть меню' : 'Открыть меню'}" aria-expanded="${state.mobileMenuOpen}">${state.mobileMenuOpen ? '✕' : '☰'}</button>
     </div>
+    <p class="tagline">Учёт и касса</p>
+    <nav class="nav-list ${state.mobileMenuOpen ? 'open' : ''}">
+      ${items}
+      <div class="sidebar-spacer"></div>
+      <div class="user-box">
+        <div>
+          <div class="who">${esc(state.currentUser.name)}</div>
+          <span class="badge ${state.currentUser.role === 'admin' ? 'badge-admin' : 'badge-cashier'}">${state.currentUser.role === 'admin' ? 'Админ' : 'Кассир'}</span>
+        </div>
+        <button class="btn btn-ghost btn-sm" style="margin-left:auto;" onclick="logout()">Выйти</button>
+      </div>
+    </nav>
+    ${state.mobileMenuOpen ? `<div class="mobile-menu-backdrop" onclick="toggleMobileMenu()"></div>` : ''}
   </aside>`;
 }
 
