@@ -64,7 +64,7 @@ router.post('/', async (req, res) => {
       await client.query('UPDATE products SET stock = stock - $1 WHERE id = $2', [qty, product.id]);
       const subtotal = Number(product.price) * qty;
       total += subtotal;
-      lineItems.push({ productId: product.id, name: product.name, price: product.price, qty, subtotal });
+      lineItems.push({ productId: product.id, name: product.name, price: product.price, costPrice: product.cost_price || 0, qty, subtotal });
     }
 
     const receiptResult = await client.query(
@@ -75,8 +75,8 @@ router.post('/', async (req, res) => {
 
     for (const li of lineItems) {
       await client.query(
-        'INSERT INTO receipt_items (receipt_id, product_id, product_name, price, qty, subtotal) VALUES ($1,$2,$3,$4,$5,$6)',
-        [receipt.id, li.productId, li.name, li.price, li.qty, li.subtotal]
+        'INSERT INTO receipt_items (receipt_id, product_id, product_name, price, cost_price, qty, subtotal) VALUES ($1,$2,$3,$4,$5,$6,$7)',
+        [receipt.id, li.productId, li.name, li.price, li.costPrice, li.qty, li.subtotal]
       );
     }
 

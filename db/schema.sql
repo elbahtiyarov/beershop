@@ -15,6 +15,7 @@ CREATE TABLE IF NOT EXISTS products (
   name VARCHAR(200) NOT NULL,
   category VARCHAR(100) NOT NULL DEFAULT 'Пиво',
   price NUMERIC(10,2) NOT NULL CHECK (price >= 0),
+  cost_price NUMERIC(10,2) NOT NULL DEFAULT 0 CHECK (cost_price >= 0),
   stock INTEGER NOT NULL DEFAULT 0 CHECK (stock >= 0),
   image_url TEXT,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -23,8 +24,16 @@ CREATE TABLE IF NOT EXISTS products (
 -- На случай, если таблица создавалась раньше без этих колонок
 ALTER TABLE products ADD COLUMN IF NOT EXISTS image_url TEXT;
 ALTER TABLE products ADD COLUMN IF NOT EXISTS category VARCHAR(100) NOT NULL DEFAULT 'Пиво';
+ALTER TABLE products ADD COLUMN IF NOT EXISTS cost_price NUMERIC(10,2) NOT NULL DEFAULT 0;
 CREATE INDEX IF NOT EXISTS idx_products_barcode ON products(barcode);
 CREATE INDEX IF NOT EXISTS idx_products_category ON products(category);
+
+-- Наценка по категориям (в процентах). Цена = себестоимость * (1 + наценка/100)
+CREATE TABLE IF NOT EXISTS category_markups (
+  category VARCHAR(100) PRIMARY KEY,
+  markup_percent NUMERIC(6,2) NOT NULL DEFAULT 0,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
 
 CREATE TABLE IF NOT EXISTS receipts (
   id SERIAL PRIMARY KEY,
@@ -46,9 +55,11 @@ CREATE TABLE IF NOT EXISTS receipt_items (
   product_id INTEGER REFERENCES products(id) ON DELETE SET NULL,
   product_name VARCHAR(200) NOT NULL,
   price NUMERIC(10,2) NOT NULL,
+  cost_price NUMERIC(10,2) NOT NULL DEFAULT 0,
   qty INTEGER NOT NULL CHECK (qty > 0),
   subtotal NUMERIC(10,2) NOT NULL
 );
+ALTER TABLE receipt_items ADD COLUMN IF NOT EXISTS cost_price NUMERIC(10,2) NOT NULL DEFAULT 0;
 CREATE INDEX IF NOT EXISTS idx_receipt_items_receipt ON receipt_items(receipt_id);
 
 -- Триггер для updated_at у товаров

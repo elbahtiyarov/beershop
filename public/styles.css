@@ -180,6 +180,15 @@ td input, td select{ padding:6px 8px; border-radius:6px; border:1px solid var(--
 .cat-manage-row{ display:flex; align-items:center; gap:10px; padding:8px 10px; border-radius:8px; background: var(--surface-alt); flex-wrap:wrap; }
 .cat-manage-name{ font-weight:600; font-size:0.88rem; min-width:120px; }
 .cat-manage-count{ font-size:0.76rem; color: var(--ink-soft); margin-right:auto; }
+.cat-markup-cell{ display:flex; align-items:center; gap:6px; font-size:0.82rem; color: var(--ink-soft); }
+.cat-markup-cell input{ padding:6px 8px; border-radius:6px; border:1px solid var(--border); background:var(--surface); font-size:0.85rem; }
+
+.stats-grid{ display:grid; grid-template-columns: repeat(auto-fit, minmax(160px,1fr)); gap:12px; }
+.stat-card{ background: var(--surface); border:1px solid var(--border); border-radius: var(--radius); padding:16px; }
+.stat-card.highlight{ background: linear-gradient(135deg, #f3e6c8, #e6d3ab); border-color: var(--amber); }
+.stat-label{ font-size:0.76rem; color: var(--ink-soft); text-transform:uppercase; letter-spacing:0.03em; font-weight:600; margin-bottom:6px; }
+.stat-value{ font-family:'JetBrains Mono',monospace; font-size:1.3rem; font-weight:700; color: var(--ink); }
+.chart-wrap{ position:relative; height:260px; margin-top:10px; }
 
 .modal-overlay{ position:fixed; inset:0; background: rgba(42,33,24,0.5); display:flex; align-items:center; justify-content:center; padding:20px; z-index:50; }
 .modal-card{ background:#fff; border-radius:14px; max-width: 420px; width:100%; max-height:88vh; overflow-y:auto; box-shadow: 0 30px 60px rgba(0,0,0,0.25); }

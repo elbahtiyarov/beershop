@@ -23,6 +23,9 @@ let state = {
   productsSearch: '',
   posCategoryAdmin: 'all',
   mobileMenuOpen: false,
+  categoryMarkups: {},
+  analyticsData: null,
+  analyticsPeriodDays: 7,
   toast: null,
   userFormError: '',
   scanFlash: '', // '', 'ok', 'error'
@@ -316,12 +319,90 @@ async function addProduct() {
   const price = Number(document.getElementById('new-p-price').value);
   const stock = Number(document.getElementById('new-p-stock').value);
   const barcode = document.getElementById('new-p-barcode').value.trim();
+  const costPriceEl = document.getElementById('new-p-cost');
+  const costPrice = costPriceEl ? Number(costPriceEl.value) || 0 : 0;
   if (!name || !price || price <= 0) { showToast('Укажите название и цену товара'); return; }
   try {
-    const created = await api('/products', { method: 'POST', body: { name, price, stock: stock || 0, barcode: barcode || null, category: category || 'Пиво' } });
+    const created = await api('/products', { method: 'POST', body: { name, price, stock: stock || 0, barcode: barcode || null, category: category || 'Пиво', cost_price: costPrice } });
     state.products.push(created);
     render();
   } catch (err) { showToast(err.message); }
+}
+
+/* ============ КАТЕГОРИИ: НАЦЕНКА ============ */
+async function loadCategoryMarkups() {
+  try {
+    const rows = await api('/products/categories/markups');
+    state.categoryMarkups = {};
+    rows.forEach(r => { state.categoryMarkups[r.category] = Number(r.markup_percent); });
+  } catch (err) { showToast(err.message); }
+}
+async function updateCategoryMarkup(category, value) {
+  const percent = Number(value);
+  if (Number.isNaN(percent)) return;
+  try {
+    await api('/products/categories/' + encodeURIComponent(category) + '/markup', { method: 'PUT', body: { markup_percent: percent } });
+    state.categoryMarkups[category] = percent;
+    showToast('Наценка сохранена');
+  } catch (err) { showToast(err.message); render(); }
+}
+async function applyCategoryMarkup(category) {
+  if (!confirm('Пересчитать цены всех товаров категории «' + category + '» по себестоимости и наценке ' + (state.categoryMarkups[category] || 0) + '%?')) return;
+  try {
+    const result = await api('/products/categories/' + encodeURIComponent(category) + '/apply-markup', { method: 'POST' });
+    await loadAll();
+    let msg = 'Обновлено цен: ' + result.updated;
+    if (result.withoutCost > 0) msg += '. Без себестоимости пропущено: ' + result.withoutCost;
+    showToast(msg);
+  } catch (err) { showToast(err.message); }
+}
+
+/* ============ ПОКАЗАТЕЛИ (АНАЛИТИКА) ============ */
+let analyticsChartInstance = null;
+async function loadAnalytics(days) {
+  try {
+    state.analyticsData = await api('/analytics/summary?days=' + days);
+  } catch (err) { showToast(err.message); }
+  render();
+}
+async function setAnalyticsPeriod(days) {
+  state.analyticsPeriodDays = days;
+  await loadAnalytics(days);
+}
+function renderAnalyticsChart() {
+  const canvas = document.getElementById('analytics-chart');
+  if (!canvas || !state.analyticsData || typeof Chart === 'undefined') return;
+  if (analyticsChartInstance) { analyticsChartInstance.destroy(); analyticsChartInstance = null; }
+  const labels = state.analyticsData.series.map(p => {
+    const d = new Date(p.date + 'T00:00:00');
+    return d.toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit' });
+  });
+  const data = state.analyticsData.series.map(p => p.revenue);
+  analyticsChartInstance = new Chart(canvas.getContext('2d'), {
+    type: 'line',
+    data: {
+      labels,
+      datasets: [{
+        label: 'Выручка',
+        data,
+        borderColor: '#c1780f',
+        backgroundColor: 'rgba(193,120,15,0.15)',
+        tension: 0.35,
+        fill: true,
+        pointRadius: 3,
+        pointBackgroundColor: '#c1780f',
+      }],
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: { legend: { display: false } },
+      scales: {
+        y: { beginAtZero: true, ticks: { callback: v => (v >= 1000 ? (v / 1000) + 'к' : v) } },
+        x: { grid: { display: false } },
+      },
+    },
+  });
 }
 
 /* ============ USERS (admin) ============ */
@@ -368,6 +449,8 @@ async function setView(v) {
   state.mobileMenuOpen = false;
   if (v === 'users' && state.currentUser.role === 'admin') await loadUsers();
   if (v === 'trash' && state.currentUser.role === 'admin') await loadTrash();
+  if (v === 'products' && state.currentUser.role === 'admin') await loadCategoryMarkups();
+  if (v === 'analytics' && state.currentUser.role === 'admin') await loadAnalytics(state.analyticsPeriodDays);
   render();
   if (v === 'pos') focusScanInput();
 }
@@ -425,6 +508,7 @@ function navItems() {
   const role = state.currentUser.role;
   const items = [{ id: 'pos', label: 'Касса' }, { id: 'products', label: 'Товары' }];
   items.push({ id: 'history', label: 'История чеков' });
+  if (role === 'admin') items.push({ id: 'analytics', label: 'Показатели' });
   if (role === 'admin') items.push({ id: 'trash', label: 'Корзина' });
   if (role === 'admin') items.push({ id: 'users', label: 'Пользователи' });
   return items;
@@ -582,6 +666,7 @@ function renderProducts() {
         </div>
       </td>
       <td style="width:150px;"><input type="text" class="mono" value="${esc(p.barcode || '')}" placeholder="—" onchange="updateProduct(${p.id},'barcode', this.value)"></td>
+      <td style="width:110px;"><input class="num" type="number" min="0" step="0.01" value="${p.cost_price || 0}" onchange="updateProduct(${p.id},'cost_price', this.value)"></td>
       <td style="width:120px;"><input class="num" type="number" min="0" step="0.01" value="${p.price}" onchange="updateProduct(${p.id},'price', this.value)"></td>
       <td style="width:100px;"><input class="num" type="number" min="0" value="${p.stock}" onchange="updateProduct(${p.id},'stock', this.value)"></td>
       <td style="width:60px;"><button class="btn btn-danger btn-sm" onclick="deleteProduct(${p.id})">Удалить</button></td>
@@ -593,10 +678,18 @@ function renderProducts() {
 
   const categoryManageRows = categories.map(c => {
     const count = state.products.filter(p => p.category === c).length;
+    const markup = state.categoryMarkups[c] !== undefined ? state.categoryMarkups[c] : '';
     return `
     <div class="cat-manage-row">
       <span class="cat-manage-name">${esc(c)}</span>
       <span class="cat-manage-count">${count} шт.</span>
+      ${isAdmin ? `
+      <div class="cat-markup-cell">
+        <input type="number" class="num" step="0.1" min="0" style="width:70px;" placeholder="0" value="${markup}"
+          onchange="updateCategoryMarkup('${esc(c).replace(/'/g, "\\'")}', this.value)">
+        <span>%</span>
+        <button class="btn btn-hop btn-sm" onclick="applyCategoryMarkup('${esc(c).replace(/'/g, "\\'")}')">Применить</button>
+      </div>` : ''}
       <button class="btn btn-ghost btn-sm" onclick="renameCategory('${esc(c).replace(/'/g, "\\'")}')">Переименовать</button>
       <button class="btn btn-danger btn-sm" onclick="deleteCategory('${esc(c).replace(/'/g, "\\'")}')">Удалить</button>
     </div>`;
@@ -604,11 +697,12 @@ function renderProducts() {
 
   return `
   <div class="page-head">
-    <div><h2>Товары</h2><div class="page-sub">${isAdmin ? 'Учёт ассортимента, фото, категорий, штрихкодов и остатков' : 'Можно добавлять новые товары. Изменение и удаление — только у администратора'} (${state.products.length} шт.)</div></div>
+    <div><h2>Товары</h2><div class="page-sub">${isAdmin ? 'Учёт ассортимента, фото, категорий, себестоимости и остатков' : 'Можно добавлять новые товары. Изменение и удаление — только у администратора'} (${state.products.length} шт.)</div></div>
   </div>
   ${isAdmin && categories.length > 0 ? `
   <div class="panel" style="margin-bottom:16px;">
-    <h3 style="font-size:0.95rem; margin-bottom:10px;">Категории</h3>
+    <h3 style="font-size:0.95rem; margin-bottom:4px;">Категории и наценка</h3>
+    <div class="page-sub" style="margin-bottom:10px;">Наценка применяется к товарам с указанной себестоимостью: цена = себестоимость × (1 + наценка/100)</div>
     <div class="cat-manage-list">${categoryManageRows}</div>
   </div>` : ''}
   <div class="panel">
@@ -622,7 +716,7 @@ function renderProducts() {
       </div>
     </div>
     <table>
-      <thead><tr><th>Фото</th><th>Название</th><th>Категория</th><th>Штрихкод</th><th>Цена, ₸</th><th>Остаток</th>${isAdmin ? '<th></th>' : ''}</tr></thead>
+      <thead><tr><th>Фото</th><th>Название</th><th>Категория</th><th>Штрихкод</th>${isAdmin ? '<th>Себестоимость</th>' : ''}<th>Цена, ₸</th><th>Остаток</th>${isAdmin ? '<th></th>' : ''}</tr></thead>
       <tbody>${rows || ''}</tbody>
     </table>
     ${state.products.length === 0 ? '<div class="empty-state">Товаров пока нет — добавьте первый ниже.</div>' : ''}
@@ -637,6 +731,7 @@ function renderProducts() {
         </div>
       </div>
       <div class="field"><label>Штрихкод</label><input id="new-p-barcode" type="text" placeholder="Скан. или вручную"></div>
+      ${isAdmin ? `<div class="field"><label>Себестоимость, ₸</label><input id="new-p-cost" type="number" min="0" placeholder="300"></div>` : ''}
       <div class="field"><label>Цена, ₸</label><input id="new-p-price" type="number" min="0" placeholder="500"></div>
       <div class="field"><label>Остаток</label><input id="new-p-stock" type="number" min="0" placeholder="20"></div>
       <button class="btn btn-hop" onclick="addProduct()">Добавить товар</button>
@@ -689,6 +784,53 @@ function renderHistory() {
       <tbody>${rows}</tbody>
     </table>
     ${list.length === 0 ? '<div class="empty-state">Чеков пока нет.</div>' : ''}
+  </div>`;
+}
+
+/* ============ RENDER: ANALYTICS (admin only) ============ */
+function renderAnalytics() {
+  const d = state.analyticsData;
+  const periodLabels = { 7: 'За неделю', 30: 'За месяц', 90: 'За квартал' };
+  const periodOptions = [7, 30, 90].map(p => `<option value="${p}" ${state.analyticsPeriodDays === p ? 'selected' : ''}>${periodLabels[p]}</option>`).join('');
+
+  if (!d) {
+    return `
+    <div class="page-head"><div><h2>Показатели</h2></div></div>
+    <div class="panel"><div class="empty-state">Загрузка…</div></div>`;
+  }
+
+  return `
+  <div class="page-head">
+    <div><h2>Показатели</h2><div class="page-sub">Сегодня, ${new Date().toLocaleDateString('ru-RU')}</div></div>
+  </div>
+  <div class="stats-grid">
+    <div class="stat-card">
+      <div class="stat-label">Выручка</div>
+      <div class="stat-value">${fmt(d.today.revenue)}</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Средний чек</div>
+      <div class="stat-value">${fmt(d.today.avgCheck)}</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Количество продаж</div>
+      <div class="stat-value">${d.today.salesCount}</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Себестоимость</div>
+      <div class="stat-value">${fmt(d.today.cost)}</div>
+    </div>
+    <div class="stat-card highlight">
+      <div class="stat-label">Валовая прибыль</div>
+      <div class="stat-value">${fmt(d.today.grossProfit)}</div>
+    </div>
+  </div>
+  <div class="panel" style="margin-top:16px;">
+    <div class="table-toolbar">
+      <h3 style="font-size:0.95rem;">Динамика выручки</h3>
+      <select onchange="setAnalyticsPeriod(Number(this.value))">${periodOptions}</select>
+    </div>
+    <div class="chart-wrap"><canvas id="analytics-chart"></canvas></div>
   </div>`;
 }
 
@@ -803,6 +945,7 @@ function render() {
   else if (state.view === 'products') viewHtml = renderProducts();
   else if (state.view === 'history') viewHtml = renderHistory();
   else if (state.view === 'trash' && state.currentUser.role === 'admin') viewHtml = renderTrash();
+  else if (state.view === 'analytics' && state.currentUser.role === 'admin') viewHtml = renderAnalytics();
   else if (state.view === 'users' && state.currentUser.role === 'admin') viewHtml = renderUsers();
   else viewHtml = renderPOS();
 
@@ -815,6 +958,7 @@ function render() {
     ${state.toast ? `<div class="toast">${esc(state.toast)}</div>` : ''}
   `;
   if (state.view === 'pos' && !state.receiptToShow) focusScanInput();
+  if (state.view === 'analytics') renderAnalyticsChart();
 }
 
 /* ============ INIT ============ */
