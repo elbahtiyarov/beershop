@@ -1,0 +1,15 @@
+# Зависимости — восстанавливаются командой npm install
+node_modules/
+
+# Секреты — никогда не должны попадать в репозиторий
+.env
+
+# Загруженные пользователями фото товаров (это данные, не код)
+public/uploads/products/*
+!public/uploads/products/.gitkeep
+
+# Системные и служебные файлы
+.DS_Store
+Thumbs.db
+npm-debug.log*
+*.log
