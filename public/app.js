@@ -68,7 +68,7 @@ async function api(path, { method = 'GET', body } = {}) {
 function esc(str) {
   return String(str).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
-function fmt(n) { return Number(n || 0).toLocaleString('ru-RU') + ' \u20B8'; }
+function fmt(n) { return Number(n || 0).toLocaleString('ru-RU', { maximumFractionDigits: 2 }) + ' \u20B8'; }
 function fmtDate(iso) {
   const d = new Date(iso);
   return d.toLocaleDateString('ru-RU') + ' ' + d.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
@@ -160,7 +160,9 @@ function addToCart(productId) {
   }
   if (inCart) inCart.qty++;
   else state.cart.push({ productId, name: product.name, price: Number(product.price), qty: 1 });
+  state.lastAddedId = productId;
   render();
+  setTimeout(() => { if (state.lastAddedId === productId) state.lastAddedId = null; }, 600);
 }
 function changeCartQty(productId, delta) {
   const item = state.cart.find(i => i.productId === productId);
@@ -227,14 +229,20 @@ async function checkout(paymentDetails) {
     state.receipts.unshift(receipt);
     state.cart = [];
     state.showPaymentModal = false;
+    state.justPaid = {
+      id: receipt.id,
+      change: paymentDetails.received_amount != null ? Math.max(0, +(Number(paymentDetails.received_amount) - Number(receipt.total)).toFixed(2)) : 0,
+      received: paymentDetails.received_amount,
+    };
     state.receiptToShow = receipt;
     render();
   } catch (err) {
     showToast(err.message || 'Не удалось оформить чек');
   }
 }
-function closeReceiptModal() { state.receiptToShow = null; render(); focusScanInput(); }
+function closeReceiptModal() { state.receiptToShow = null; state.justPaid = null; render(); focusScanInput(); }
 async function openReceipt(id) {
+  state.justPaid = null;
   let r = state.receipts.find(r => r.id === id);
   try {
     r = await api('/receipts/' + id);
@@ -607,7 +615,7 @@ function navItems() {
 }
 function renderSidebar() {
   const items = navItems().map(it => `
-    <button class="nav-item ${state.view === it.id ? 'active' : ''}" onclick="setView('${it.id}')">${esc(it.label)}</button>
+    <button class="nav-item ${state.view === it.id ? 'active' : ''}" onclick="setView('${it.id}')" title="${esc(it.label)}">${icon(it.id, 20)}<span class="nav-label">${esc(it.label)}</span></button>
   `).join('');
   return `
   <aside class="sidebar">
@@ -620,18 +628,40 @@ function renderSidebar() {
       ${items}
       <div class="sidebar-spacer"></div>
       <div class="user-box">
-        <div>
+        <div class="user-avatar" title="${esc(state.currentUser.name)}">${esc(state.currentUser.name.trim().charAt(0).toUpperCase())}</div>
+        <div class="user-meta">
           <div class="who">${esc(state.currentUser.name)}</div>
           <span class="badge ${state.currentUser.role === 'admin' ? 'badge-admin' : 'badge-cashier'}">${state.currentUser.role === 'admin' ? 'Админ' : 'Кассир'}</span>
         </div>
-        <button class="btn btn-ghost btn-sm" style="margin-left:auto;" onclick="logout()">Выйти</button>
+        <button class="btn btn-ghost btn-sm user-logout" style="margin-left:auto;" onclick="logout()" title="Выйти">${icon('logout', 18)}<span class="nav-label">Выйти</span></button>
       </div>
     </nav>
     ${state.mobileMenuOpen ? `<div class="mobile-menu-backdrop" onclick="toggleMobileMenu()"></div>` : ''}
   </aside>`;
 }
 
-/* ============ RENDER: POS ============ */
+/* ============ RENDER: POS (касса для сенсорных моноблоков) ============ */
+const ICONS = {
+  pos: '<path d="M4 7h16v10a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2z"/><path d="M8 7V5a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><path d="M8 12h8"/>',
+  products: '<path d="M9 3h6v4l2 2v10a2 2 0 0 1-2 2H9a2 2 0 0 1-2-2V9l2-2z"/><path d="M7 13h10"/>',
+  stock: '<path d="M3 9l9-5 9 5v10a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1z"/><path d="M7 20v-7h10v7"/><path d="M7 16h10"/>',
+  history: '<path d="M6 3h12v18l-3-2-3 2-3-2-3 2z"/><path d="M9 8h6M9 12h6"/>',
+  analytics: '<path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/>',
+  trash: '<path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"/>',
+  users: '<circle cx="9" cy="8" r="3.5"/><path d="M2.5 20a6.5 6.5 0 0 1 13 0"/><path d="M16 4.5a3.5 3.5 0 0 1 0 7M18 14a6.5 6.5 0 0 1 3.5 6"/>',
+  logout: '<path d="M15 4h3a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-3"/><path d="M10 16l-4-4 4-4M6 12h10"/>',
+  search: '<circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/>',
+  cart: '<path d="M3 4h2l2.4 11h11L21 7H6.2"/><circle cx="9" cy="19.5" r="1.5"/><circle cx="17" cy="19.5" r="1.5"/>',
+  cash: '<rect x="2" y="6" width="20" height="12" rx="2"/><circle cx="12" cy="12" r="3"/><path d="M6 10v4M18 10v4"/>',
+  qr: '<rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><path d="M14 14h3v3h-3zM20 14v.01M14 20h.01M17 20h4v-3"/>',
+  mixed: '<path d="M7 7h11l-3-3M17 17H6l3 3"/>',
+  back: '<path d="M21 5H9l-6 7 6 7h12z"/><path d="M17 9l-6 6M11 9l6 6"/>',
+  check: '<path d="M4 12.5l5 5L20 6.5"/>',
+};
+function icon(name, size = 22) {
+  return `<svg class="ico" width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICONS[name] || ''}</svg>`;
+}
+
 function renderPOS() {
   const categories = [...new Set(state.products.map(p => p.category).filter(Boolean))].sort();
   const search = state.posSearch.trim().toLowerCase();
@@ -641,171 +671,156 @@ function renderPOS() {
     return matchesCategory && matchesSearch;
   });
 
-  const products = filtered.map(p => {
+  const productCards = filtered.map(p => {
     const inCart = state.cart.find(i => i.productId === p.id);
     const consumption = unitConsumption(p);
-    const usedByCart = (inCart ? inCart.qty : 0) * consumption;
-    const availableVolume = Number(p.stock) - usedByCart;
+    const availableVolume = Number(p.stock) - (inCart ? inCart.qty : 0) * consumption;
     const canAddOne = availableVolume + 1e-9 >= consumption;
     const isDraft = p.unit === 'л';
-    const availableLabel = isDraft ? availableVolume.toFixed(2).replace(/\.?0+$/, '') + ' л' : Math.round(availableVolume) + ' шт';
-    const low = isDraft ? availableVolume <= Math.max(consumption * 2, 3) : p.stock <= 5;
+    const stockText = isDraft ? availableVolume.toFixed(2).replace(/\.?0+$/, '') + ' л' : Math.round(availableVolume) + ' шт';
+    const low = isDraft ? availableVolume <= Math.max(consumption * 2, 3) : availableVolume <= 5;
     return `
-    <button class="kassa-pcard" ${!canAddOne ? 'disabled' : ''} onclick="addToCart(${p.id})">
-      <div class="kassa-pcard-media">
-        ${p.image_url ? `<img src="${esc(p.image_url)}" alt="${esc(p.name)}" loading="lazy">` : `<div class="placeholder">🍺</div>`}
+    <button class="pos2-card ${inCart ? 'in-cart' : ''}" ${!canAddOne ? 'disabled' : ''} onclick="addToCart(${p.id})">
+      ${inCart ? `<span class="pos2-card-badge">${inCart.qty}</span>` : ''}
+      <div class="pos2-card-media">
+        ${p.image_url ? `<img src="${esc(p.image_url)}" alt="" loading="lazy">` : `<span class="pos2-card-ph">${esc((p.name || '?').trim().charAt(0).toUpperCase())}</span>`}
       </div>
-      <div class="kassa-pcard-name">${esc(p.name)}</div>
-      <div class="kassa-pcard-price">${fmt(p.price)}</div>
-      <div class="kassa-pcard-stock ${low ? 'low' : ''}">${availableLabel}</div>
+      <div class="pos2-card-name">${esc(p.name)}</div>
+      <div class="pos2-card-foot">
+        <span class="pos2-card-price">${fmt(p.price)}</span>
+        <span class="pos2-card-stock ${!canAddOne ? 'out' : low ? 'low' : ''}">${canAddOne ? stockText : 'нет'}</span>
+      </div>
     </button>`;
   }).join('');
 
-  const chips = ['all', ...categories].map(c => `
-    <button class="kassa-chip ${state.posCategory === c ? 'active' : ''}" onclick="setPosCategory('${esc(c).replace(/'/g, "\\'")}')">${c === 'all' ? 'Все' : esc(c)}</button>
-  `).join('');
+  const chips = ['all', ...categories].map(c => {
+    const count = c === 'all' ? state.products.length : state.products.filter(p => p.category === c).length;
+    return `<button class="pos2-chip ${state.posCategory === c ? 'active' : ''}" onclick="setPosCategory('${esc(c).replace(/'/g, "\\'")}')">${c === 'all' ? 'Все' : esc(c)}<span>${count}</span></button>`;
+  }).join('');
 
-  const cartRows = state.cart.map((i, idx) => `
-    <tr>
-      <td class="kassa-col-num">${idx + 1}</td>
-      <td>${esc(i.name)}</td>
-      <td class="num">${fmt(i.price)}</td>
-      <td class="kassa-col-qty">
-        <button class="kassa-qty-btn" onclick="changeCartQty(${i.productId}, -1)" aria-label="Уменьшить">−</button>
+  const cartRows = state.cart.map((i, idx) => {
+    const p = state.products.find(x => x.id === i.productId);
+    return `
+    <div class="pos2-line ${state.lastAddedId === i.productId ? 'just-added' : ''}">
+      <div class="pos2-line-info">
+        <div class="pos2-line-name">${esc(i.name)}</div>
+        <div class="pos2-line-price">${fmt(i.price)}${p && p.unit === 'л' ? ' · ' + unitConsumption(p) + ' л' : ''}</div>
+      </div>
+      <div class="pos2-stepper">
+        <button onclick="changeCartQty(${i.productId}, -1)" aria-label="Меньше">−</button>
         <span>${i.qty}</span>
-        <button class="kassa-qty-btn" onclick="changeCartQty(${i.productId}, 1)" aria-label="Увеличить">+</button>
-      </td>
-      <td class="num kassa-col-sum">${fmt(i.price * i.qty)}</td>
-      <td class="kassa-col-remove"><button class="kassa-row-remove" onclick="changeCartQty(${i.productId}, -${i.qty})" aria-label="Убрать из чека">×</button></td>
-    </tr>`).join('');
+        <button onclick="changeCartQty(${i.productId}, 1)" aria-label="Больше">+</button>
+      </div>
+      <div class="pos2-line-sum">${fmt(i.price * i.qty)}</div>
+      <button class="pos2-line-del" onclick="changeCartQty(${i.productId}, -${i.qty})" aria-label="Убрать">×</button>
+    </div>`;
+  }).join('');
 
-  const nextReceiptNo = state.receipts.length + 1;
-  const now = new Date();
   const flashClass = state.scanFlash === 'ok' ? 'flash' : state.scanFlash === 'error' ? 'flash-error' : '';
+  const itemsCount = state.cart.reduce((s, i) => s + i.qty, 0);
+  const total = cartTotal();
+  const empty = state.cart.length === 0;
 
   return `
-  <div class="kassa-wrap">
-    <div class="kassa-topbar">
-      <div class="kassa-topbar-title">Касса</div>
-      <div class="kassa-topbar-meta">Чек № ${nextReceiptNo} &nbsp;·&nbsp; ${now.toLocaleDateString('ru-RU')} ${now.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' })}</div>
-    </div>
-
-    <div class="kassa-toolbar ${flashClass}">
-      <button type="button" class="kassa-camera-btn" onclick="openPosCamera()" title="Сканировать камерой" aria-label="Сканировать камерой">${CAMERA_ICON}</button>
-      <input id="scan-input" class="kassa-search-input" type="text" inputmode="numeric"
-        placeholder="Поиск по товару или сканируйте штрихкод"
-        autofocus
-        onkeydown="if(event.key==='Enter'){ event.preventDefault(); handleScanSubmit(this.value); }"
-        oninput="handlePosSearchInput(this.value)"
-        value="${esc(state.posSearch)}">
-    </div>
-    ${categories.length > 0 ? `<div class="kassa-chips-row">${chips}</div>` : ''}
-
-    <div class="kassa-receipt-panel">
-      <table class="kassa-receipt-table">
-        <thead>
-          <tr><th class="kassa-col-num">#</th><th>Наименование</th><th>Цена</th><th class="kassa-col-qty">Количество</th><th class="kassa-col-sum">Сумма</th><th></th></tr>
-        </thead>
-        <tbody>${cartRows}</tbody>
-      </table>
-      ${state.cart.length === 0 ? `<div class="kassa-receipt-empty">Чек пуст — отсканируйте штрихкод или выберите товар ниже</div>` : ''}
-    </div>
-
-    <div class="kassa-products-panel">
-      <div class="kassa-pcard-grid">${products || `<div class="empty-state">${state.products.length === 0 ? 'Нет товаров. Обратитесь к администратору.' : 'Ничего не найдено по заданным условиям.'}</div>`}</div>
-    </div>
-
-    <div class="kassa-footer">
-      <div class="kassa-total-box">
-        <span class="kassa-total-label">Итого</span>
-        <span class="kassa-total-value">${fmt(cartTotal())}</span>
+  <div class="pos2">
+    <section class="pos2-left">
+      <div class="pos2-search ${flashClass}">
+        <span class="pos2-search-ico">${icon('search', 22)}</span>
+        <input id="scan-input" type="text" autocomplete="off"
+          placeholder="Сканируйте штрихкод или ищите по названию"
+          autofocus
+          onkeydown="if(event.key==='Enter'){ event.preventDefault(); handleScanSubmit(this.value); } else if(event.key==='Escape'){ handlePosSearchInput(''); }"
+          oninput="handlePosSearchInput(this.value)"
+          value="${esc(state.posSearch)}">
+        ${state.posSearch ? `<button class="pos2-search-clear" onclick="handlePosSearchInput('')" aria-label="Очистить поиск">×</button>` : ''}
+        <button type="button" class="pos2-camera" onclick="openPosCamera()" title="Сканировать камерой">${CAMERA_ICON}<span>Камера</span></button>
       </div>
-      <div class="kassa-footer-actions">
-        <button class="kassa-btn-clear" ${state.cart.length === 0 ? 'disabled' : ''} onclick="clearCart()">Очистить</button>
-        <button class="kassa-btn-pay" ${state.cart.length === 0 ? 'disabled' : ''} onclick="openPaymentModal()">Оплата</button>
+      ${categories.length > 0 ? `<div class="pos2-chips">${chips}</div>` : ''}
+      <div class="pos2-grid-wrap">
+        <div class="pos2-grid">${productCards || `<div class="empty-state">${state.products.length === 0 ? 'Нет товаров. Обратитесь к администратору.' : 'Ничего не найдено'}</div>`}</div>
       </div>
-    </div>
+    </section>
+
+    <aside class="pos2-right">
+      <div class="pos2-check-head">
+        <div>
+          <div class="pos2-check-title">${icon('cart', 20)} Чек</div>
+          <div class="pos2-check-meta">${esc(state.currentUser.name)} · ${new Date().toLocaleDateString('ru-RU')}</div>
+        </div>
+        <button class="pos2-clear" ${empty ? 'disabled' : ''} onclick="clearCart()">${icon('trash', 18)} Очистить</button>
+      </div>
+      <div class="pos2-lines" id="pos2-lines">
+        ${empty ? `
+        <div class="pos2-empty">
+          <div class="pos2-empty-ico">${CAMERA_ICON}</div>
+          <div class="pos2-empty-title">Чек пуст</div>
+          <div class="pos2-empty-sub">Отсканируйте штрихкод или нажмите на товар слева</div>
+        </div>` : cartRows}
+      </div>
+      <div class="pos2-summary">
+        <div class="pos2-summary-row"><span>Позиций</span><span>${state.cart.length} · ${itemsCount} ед.</span></div>
+        <div class="pos2-total"><span>Итого</span><span class="pos2-total-val">${fmt(total)}</span></div>
+        <button class="pos2-pay" ${empty ? 'disabled' : ''} onclick="openPaymentModal()">
+          <span>Оплата</span><kbd>F2</kbd>
+        </button>
+        <div class="pos2-fast">
+          <button ${empty ? 'disabled' : ''} onclick="quickPay('cash')">${icon('cash', 20)} Наличные без сдачи</button>
+          <button ${empty ? 'disabled' : ''} onclick="quickPay('qr')">${icon('qr', 20)} QR</button>
+        </div>
+      </div>
+    </aside>
   </div>
   ${state.showPaymentModal ? renderPaymentModal() : ''}`;
 }
-function renderPaymentModal() {
-  const total = cartTotal();
-  const method = state.paymentMethod;
-  const received = Number(state.paymentReceived) || 0;
-  const change = received - total;
-  const cashPart = Number(state.paymentCashPart) || 0;
-  const qrPart = Number(state.paymentQrPart) || 0;
-  const mixedDiff = +(total - cashPart - qrPart).toFixed(2);
 
-  return `
-  <div class="modal-overlay" onclick="if(event.target===this) closePaymentModal()">
-    <div class="modal-card payment-modal">
-      <div class="modal-close-row"><button class="icon-btn" onclick="closePaymentModal()" aria-label="Закрыть">×</button></div>
-      <div class="payment-body">
-        <h3 class="add-product-title">Оплата чека</h3>
-        <div class="payment-total-row">
-          <span>К оплате</span>
-          <span class="payment-total-value">${fmt(total)}</span>
-        </div>
-
-        <div class="payment-method-tabs">
-          <button class="payment-tab ${method === 'cash' ? 'active' : ''}" onclick="setPaymentMethod('cash')">Наличные</button>
-          <button class="payment-tab ${method === 'qr' ? 'active' : ''}" onclick="setPaymentMethod('qr')">QR-код</button>
-          <button class="payment-tab ${method === 'mixed' ? 'active' : ''}" onclick="setPaymentMethod('mixed')">Смешанный</button>
-        </div>
-
-        ${method === 'cash' ? `
-        <div class="field">
-          <label>Получено наличными, ₸</label>
-          <input id="payment-received-input" type="number" min="0" step="1" placeholder="${Math.ceil(total)}" value="${state.paymentReceived}"
-            oninput="setPaymentReceived(this.value)" autofocus>
-        </div>
-        <div class="payment-change-row ${change < 0 ? 'negative' : ''}">
-          <span>Сдача</span>
-          <span>${fmt(Math.max(0, change))}</span>
-        </div>` : ''}
-
-        ${method === 'qr' ? `
-        <div class="payment-qr-hint">Покажите покупателю QR-код для оплаты на терминале. Сумма к оплате — ${fmt(total)}.</div>` : ''}
-
-        ${method === 'mixed' ? `
-        <div class="payment-mixed-grid">
-          <div class="field">
-            <label>Наличными, ₸</label>
-            <input id="payment-cash-input" type="number" min="0" step="1" value="${state.paymentCashPart}" oninput="setPaymentMixedPart('cash', this.value)">
-            <button type="button" class="btn btn-ghost btn-sm" style="margin-top:6px;" onclick="fillMixedRest('cash')">Заполнить остаток</button>
-          </div>
-          <div class="field">
-            <label>По QR, ₸</label>
-            <input id="payment-qr-input" type="number" min="0" step="1" value="${state.paymentQrPart}" oninput="setPaymentMixedPart('qr', this.value)">
-            <button type="button" class="btn btn-ghost btn-sm" style="margin-top:6px;" onclick="fillMixedRest('qr')">Заполнить остаток</button>
-          </div>
-        </div>
-        <div class="payment-change-row ${Math.abs(mixedDiff) > 0.01 ? 'negative' : ''}">
-          <span>${mixedDiff > 0 ? 'Не хватает' : mixedDiff < 0 ? 'Лишнее' : 'Сходится'}</span>
-          <span>${fmt(Math.abs(mixedDiff))}</span>
-        </div>` : ''}
-      </div>
-      <div class="receipt-actions">
-        <button class="btn btn-ghost" style="flex:1;" onclick="closePaymentModal()">Отмена</button>
-        <button class="kassa-btn-pay" style="flex:1;" onclick="confirmPayment()">Подтвердить</button>
-      </div>
-    </div>
-  </div>`;
+/* ============ ОПЛАТА (экранная клавиатура, быстрые купюры, сдача) ============ */
+const BANKNOTES = [500, 1000, 2000, 5000, 10000, 20000];
+function quickCashAmounts(total) {
+  const set = new Set();
+  BANKNOTES.forEach(n => {
+    const v = Math.ceil(total / n) * n;
+    if (v > total + 0.001) set.add(v);
+  });
+  return [...set].sort((a, b) => a - b).slice(0, 5);
 }
-function clearCart() {
-  if (state.cart.length === 0) return;
-  if (!confirm('Очистить текущий чек?')) return;
-  state.cart = [];
+function paymentTargetValue() {
+  const f = state.paymentActiveField;
+  if (f === 'cash') return state.paymentCashPart;
+  if (f === 'qr') return state.paymentQrPart;
+  return state.paymentReceived;
+}
+function setPaymentTargetValue(v) {
+  const f = state.paymentActiveField;
+  if (f === 'cash') state.paymentCashPart = v;
+  else if (f === 'qr') state.paymentQrPart = v;
+  else state.paymentReceived = v;
+}
+function numpadPress(key) {
+  if (state.paymentMethod === 'qr') return;
+  let v = String(paymentTargetValue() || '');
+  if (key === 'back') v = v.slice(0, -1);
+  else if (key === 'clear') v = '';
+  else if (key === '.') { if (!v.includes('.')) v = (v || '0') + '.'; }
+  else {
+    if (v === '0') v = '';
+    if (v.includes('.') && v.split('.')[1].length >= 2) return;
+    if (v.replace('.', '').length >= 9) return;
+    v += key;
+  }
+  setPaymentTargetValue(v);
   render();
-  focusScanInput();
 }
-
-/* ============ ОПЛАТА ============ */
+function setQuickCash(amount) {
+  state.paymentActiveField = 'received';
+  state.paymentReceived = String(amount);
+  render();
+}
 function openPaymentModal() {
-  if (state.cart.length === 0) return;
+  if (state.cart.length === 0 || state.showPaymentModal) return;
   state.showPaymentModal = true;
+  state.payAnimate = true; // анимация появления — только при открытии, не на каждое нажатие цифры
   state.paymentMethod = 'cash';
+  state.paymentActiveField = 'received';
   state.paymentReceived = '';
   state.paymentCashPart = '';
   state.paymentQrPart = '';
@@ -818,20 +833,12 @@ function closePaymentModal() {
 }
 function setPaymentMethod(method) {
   state.paymentMethod = method;
+  state.paymentActiveField = method === 'mixed' ? 'cash' : 'received';
   render();
 }
-function setPaymentReceived(value) {
-  state.paymentReceived = value;
+function setPaymentActiveField(f) {
+  state.paymentActiveField = f;
   render();
-  const el = document.getElementById('payment-received-input');
-  if (el) { el.focus(); el.setSelectionRange(value.length, value.length); }
-}
-function setPaymentMixedPart(field, value) {
-  if (field === 'cash') state.paymentCashPart = value;
-  else state.paymentQrPart = value;
-  render();
-  const el = document.getElementById(field === 'cash' ? 'payment-cash-input' : 'payment-qr-input');
-  if (el) { el.focus(); el.setSelectionRange(value.length, value.length); }
 }
 function fillMixedRest(field) {
   const total = cartTotal();
@@ -842,13 +849,26 @@ function fillMixedRest(field) {
     const cash = Number(state.paymentCashPart) || 0;
     state.paymentQrPart = String(Math.max(0, +(total - cash).toFixed(2)));
   }
+  state.paymentActiveField = field;
   render();
+}
+function paymentCanConfirm() {
+  const total = cartTotal();
+  if (state.paymentMethod === 'qr') return true;
+  if (state.paymentMethod === 'cash') {
+    // Пустое поле = без сдачи (ровно)
+    const r = state.paymentReceived === '' ? total : Number(state.paymentReceived) || 0;
+    return r >= total - 0.01;
+  }
+  const cash = Number(state.paymentCashPart) || 0;
+  const qr = Number(state.paymentQrPart) || 0;
+  return Math.abs(cash + qr - total) <= 0.01;
 }
 function confirmPayment() {
   const total = cartTotal();
   const method = state.paymentMethod;
   if (method === 'cash') {
-    const received = Number(state.paymentReceived) || 0;
+    const received = state.paymentReceived === '' ? total : Number(state.paymentReceived) || 0;
     if (received < total - 0.01) { showToast('Получено меньше суммы чека'); return; }
     checkout({ payment_method: 'cash', cash_amount: total, qr_amount: 0, received_amount: received });
   } else if (method === 'qr') {
@@ -859,6 +879,140 @@ function confirmPayment() {
     if (Math.abs(cash + qr - total) > 0.01) { showToast('Сумма наличными и по QR должна совпадать с итогом'); return; }
     checkout({ payment_method: 'mixed', cash_amount: cash, qr_amount: qr, received_amount: cash });
   }
+}
+// Быстрые кнопки под «Оплатой»: один тап — чек проведён
+function quickPay(method) {
+  if (state.cart.length === 0) return;
+  const total = cartTotal();
+  if (method === 'qr') checkout({ payment_method: 'qr', cash_amount: 0, qr_amount: total, received_amount: null });
+  else checkout({ payment_method: 'cash', cash_amount: total, qr_amount: 0, received_amount: total });
+}
+
+function renderPaymentModal() {
+  const total = cartTotal();
+  const method = state.paymentMethod;
+  const active = state.paymentActiveField;
+  const receivedStr = state.paymentReceived;
+  const received = receivedStr === '' ? 0 : Number(receivedStr) || 0;
+  const change = received - total;
+  const cashPart = Number(state.paymentCashPart) || 0;
+  const qrPart = Number(state.paymentQrPart) || 0;
+  const mixedDiff = +(total - cashPart - qrPart).toFixed(2);
+  const canConfirm = paymentCanConfirm();
+  const showValue = v => (v === '' ? '' : Number(v).toLocaleString('ru-RU', { maximumFractionDigits: 2 }) + (String(v).endsWith('.') ? ',' : ''));
+
+  let resultBox = '';
+  if (method === 'cash') {
+    if (receivedStr === '') resultBox = `<div class="pay2-change neutral"><span>Сдача</span><b>—</b><small>Введите сумму от покупателя или нажмите «Без сдачи»</small></div>`;
+    else if (change >= -0.01) resultBox = `<div class="pay2-change ok"><span>Сдача</span><b>${fmt(Math.max(0, +change.toFixed(2)))}</b></div>`;
+    else resultBox = `<div class="pay2-change bad"><span>Не хватает</span><b>${fmt(+(-change).toFixed(2))}</b></div>`;
+  } else if (method === 'mixed') {
+    resultBox = `<div class="pay2-change ${Math.abs(mixedDiff) <= 0.01 ? 'ok' : 'bad'}"><span>${mixedDiff > 0.01 ? 'Не хватает' : mixedDiff < -0.01 ? 'Лишнее' : 'Сходится'}</span><b>${fmt(Math.abs(mixedDiff))}</b></div>`;
+  }
+
+  const keys = ['7', '8', '9', '4', '5', '6', '1', '2', '3', '00', '0', 'back'];
+  const numpad = `
+    <div class="pay2-numpad ${method === 'qr' ? 'disabled' : ''}">
+      ${keys.map(k => `<button onclick="numpadPress('${k}')" ${k === 'back' ? 'class="key-back" aria-label="Стереть"' : ''}>${k === 'back' ? icon('back', 26) : k}</button>`).join('')}
+      <button class="key-clear" onclick="numpadPress('clear')">Сброс</button>
+    </div>`;
+
+  return `
+  <div class="modal-overlay pay2-overlay" onclick="if(event.target===this) closePaymentModal()">
+    <div class="pay2 ${state.payAnimate ? 'pay2-anim' : ''}" role="dialog" aria-label="Оплата">
+      <div class="pay2-head">
+        <div>
+          <div class="pay2-head-label">К оплате</div>
+          <div class="pay2-head-total">${fmt(total)}</div>
+        </div>
+        <button class="pay2-close" onclick="closePaymentModal()" aria-label="Закрыть">×</button>
+      </div>
+
+      <div class="pay2-methods">
+        <button class="${method === 'cash' ? 'active' : ''}" onclick="setPaymentMethod('cash')">${icon('cash', 24)}<span>Наличные</span></button>
+        <button class="${method === 'qr' ? 'active' : ''}" onclick="setPaymentMethod('qr')">${icon('qr', 24)}<span>QR / Kaspi</span></button>
+        <button class="${method === 'mixed' ? 'active' : ''}" onclick="setPaymentMethod('mixed')">${icon('mixed', 24)}<span>Смешанная</span></button>
+      </div>
+
+      <div class="pay2-body">
+        <div class="pay2-left">
+          ${method === 'cash' ? `
+            <div class="pay2-field active">
+              <label>Получено от покупателя</label>
+              <div class="pay2-display">${showValue(receivedStr) || '<span class="ph">0</span>'}<span class="cur">₸</span></div>
+            </div>
+            <div class="pay2-quick">
+              <button class="exact" onclick="setQuickCash(${total})">Без сдачи</button>
+              ${quickCashAmounts(total).map(a => `<button onclick="setQuickCash(${a})">${a.toLocaleString('ru-RU')}</button>`).join('')}
+            </div>
+            ${resultBox}` : ''}
+
+          ${method === 'qr' ? `
+            <div class="pay2-qr">
+              <div class="pay2-qr-ico">${icon('qr', 64)}</div>
+              <div class="pay2-qr-title">Оплата по QR</div>
+              <div class="pay2-qr-sub">Покажите покупателю QR-код на терминале на сумму <b>${fmt(total)}</b> и дождитесь подтверждения оплаты.</div>
+            </div>` : ''}
+
+          ${method === 'mixed' ? `
+            <button class="pay2-field ${active === 'cash' ? 'active' : ''}" onclick="setPaymentActiveField('cash')">
+              <label>${icon('cash', 16)} Наличными</label>
+              <div class="pay2-display small">${showValue(state.paymentCashPart) || '<span class="ph">0</span>'}<span class="cur">₸</span></div>
+            </button>
+            <button class="pay2-rest" onclick="fillMixedRest('cash')">Остаток наличными</button>
+            <button class="pay2-field ${active === 'qr' ? 'active' : ''}" onclick="setPaymentActiveField('qr')">
+              <label>${icon('qr', 16)} По QR</label>
+              <div class="pay2-display small">${showValue(state.paymentQrPart) || '<span class="ph">0</span>'}<span class="cur">₸</span></div>
+            </button>
+            <button class="pay2-rest" onclick="fillMixedRest('qr')">Остаток по QR</button>
+            ${resultBox}` : ''}
+        </div>
+        <div class="pay2-right">${numpad}</div>
+      </div>
+
+      <div class="pay2-actions">
+        <button class="pay2-cancel" onclick="closePaymentModal()">Отмена <kbd>Esc</kbd></button>
+        <button class="pay2-confirm" ${canConfirm ? '' : 'disabled'} onclick="confirmPayment()">${icon('check', 24)} ${method === 'qr' ? 'Оплачено' : 'Провести чек'} <kbd>Enter</kbd></button>
+      </div>
+    </div>
+  </div>`;
+}
+
+/* ---- Клавиатура: F2 — оплата, цифры/Enter/Esc в окне оплаты ---- */
+document.addEventListener('keydown', (e) => {
+  if (!state.currentUser) return;
+  if (Scanner.open) { if (e.key === 'Escape') closeCameraScanner(); return; }
+  if (state.showPaymentModal) {
+    if (/^[0-9]$/.test(e.key)) { e.preventDefault(); numpadPress(e.key); }
+    else if (e.key === 'Backspace') { e.preventDefault(); numpadPress('back'); }
+    else if (e.key === 'Delete') { e.preventDefault(); numpadPress('clear'); }
+    else if (e.key === '.' || e.key === ',') { e.preventDefault(); numpadPress('.'); }
+    else if (e.key === 'Enter') { e.preventDefault(); if (paymentCanConfirm()) confirmPayment(); }
+    else if (e.key === 'Escape') { e.preventDefault(); closePaymentModal(); }
+    else if (e.key === 'F2') e.preventDefault();
+    return;
+  }
+  if (state.view !== 'pos') return;
+  // После продажи открыт чек: Enter/Esc — новая продажа; начали сканировать — чек закрывается сам
+  if (state.receiptToShow) {
+    if (e.key === 'Enter' || e.key === 'Escape') { e.preventDefault(); closeReceiptModal(); return; }
+    if (e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      e.preventDefault();
+      closeReceiptModal();
+      const el = document.getElementById('scan-input');
+      if (el) { el.value += e.key; state.posSearch = el.value; }
+    }
+    return;
+  }
+  if (e.key === 'F2' || e.key === 'F9') { e.preventDefault(); openPaymentModal(); }
+});
+
+function clearCart() {
+  if (state.cart.length === 0) return;
+  if (!confirm('Очистить текущий чек?')) return;
+  state.cart = [];
+  render();
+  focusScanInput();
 }
 
 /* ============ RENDER: PRODUCTS ============ */
@@ -1283,10 +1437,21 @@ function renderReceiptModal() {
       <span class="qp">${i.qty} × ${fmt(i.price)}</span>
     </div>`).join('');
   const changeDue = r.payment_method !== 'qr' && r.received_amount != null ? Number(r.received_amount) - Number(r.total) : 0;
+  const jp = state.justPaid && state.justPaid.id === r.id ? state.justPaid : null;
   return `
   <div class="modal-overlay" onclick="if(event.target===this) closeReceiptModal()">
-    <div class="modal-card">
-      <div class="modal-close-row"><button class="icon-btn" onclick="closeReceiptModal()" aria-label="Закрыть">×</button></div>
+    <div class="modal-card ${jp ? 'paid-card' : ''}">
+      ${jp ? `
+      <div class="paid-banner">
+        <div class="paid-check">${icon('check', 34)}</div>
+        <div class="paid-title">Оплата прошла</div>
+        ${jp.change > 0.009 ? `
+          <div class="paid-change-label">Сдача покупателю</div>
+          <div class="paid-change">${fmt(jp.change)}</div>
+          <div class="paid-sub">Получено ${fmt(jp.received)} · чек ${fmt(r.total)}</div>` : `
+          <div class="paid-sub">${paymentMethodLabel(r)} · ${fmt(r.total)} · без сдачи</div>`}
+      </div>` : `
+      <div class="modal-close-row"><button class="icon-btn" onclick="closeReceiptModal()" aria-label="Закрыть">×</button></div>`}
       <div class="receipt">
         <div class="receipt-head">
           <div class="shop">Хмель</div>
@@ -1300,7 +1465,7 @@ function renderReceiptModal() {
       </div>
       <div class="receipt-actions">
         <button class="btn btn-ghost" style="flex:1;" onclick="window.print()">Печать</button>
-        <button class="btn btn-primary" style="flex:1;" onclick="closeReceiptModal()">Готово</button>
+        <button class="btn btn-primary ${jp ? 'paid-next' : ''}" style="flex:${jp ? 2 : 1};" onclick="closeReceiptModal()">${jp ? 'Новая продажа <kbd>Enter</kbd>' : 'Готово'}</button>
       </div>
     </div>
   </div>`;
@@ -2031,7 +2196,7 @@ function render() {
   else viewHtml = renderPOS();
 
   app.innerHTML = `
-    <div class="shell">
+    <div class="shell ${state.view === 'pos' ? 'shell-pos' : ''}">
       ${renderSidebar()}
       <main class="content ${state.view === 'pos' ? 'content-wide' : ''}">${viewHtml}</main>
     </div>
@@ -2040,6 +2205,11 @@ function render() {
     ${state.toast ? `<div class="toast">${esc(state.toast)}</div>` : ''}
   `;
   if (state.view === 'pos' && !state.receiptToShow && !state.showPaymentModal) focusScanInput();
+  if (state.payAnimate) setTimeout(() => { state.payAnimate = false; }, 250);
+  if (state.view === 'pos' && state.lastAddedId) {
+    const line = document.querySelector('.pos2-line.just-added');
+    if (line) line.scrollIntoView({ block: 'nearest' });
+  }
   if (state.view === 'analytics') renderAnalyticsChart();
 }
 
