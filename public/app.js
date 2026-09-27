@@ -35,6 +35,10 @@ let state = {
   toast: null,
   userFormError: '',
   scanFlash: '', // '', 'ok', 'error'
+  productEditId: null, // открытое окно товара
+  productDraft: null,
+  productsLowOnly: false,
+  showCategoryPanel: false,
   addProductContext: 'products', // 'products' | 'stock' — откуда открыто окно «Новый товар»
   addProductPrefillBarcode: '',
   // ---- Склад ----
@@ -992,6 +996,7 @@ document.addEventListener('keydown', (e) => {
     else if (e.key === 'F2') e.preventDefault();
     return;
   }
+  if (e.key === 'Escape' && state.productEditId) { e.preventDefault(); closeProductSheet(); return; }
   if (state.view !== 'pos') return;
   // После продажи открыт чек: Enter/Esc — новая продажа; начали сканировать — чек закрывается сам
   if (state.receiptToShow) {
@@ -1015,132 +1020,68 @@ function clearCart() {
   focusScanInput();
 }
 
-/* ============ RENDER: PRODUCTS ============ */
+/* ============ RENDER: PRODUCTS (список-карточки + окно редактирования) ============ */
+function productStockInfo(p) {
+  const isDraft = p.unit === 'л';
+  const n = Number(p.stock) || 0;
+  const text = (Number.isInteger(n) ? n : n.toFixed(2).replace(/\.?0+$/, '')) + ' ' + (isDraft ? 'л' : 'шт');
+  const cls = n <= 0 ? 'out' : isLowStock(p) ? 'low' : 'ok';
+  return { text: n <= 0 ? 'нет' : text, cls };
+}
+function productThumb(p, cls) {
+  return p.image_url
+    ? `<img class="${cls}" src="${esc(p.image_url)}" alt="" loading="lazy">`
+    : `<div class="${cls} ph">${esc((p.name || '?').trim().charAt(0).toUpperCase())}</div>`;
+}
+function setProductsCategory(c) { state.posCategoryAdmin = c; render(); }
+function toggleProductsLowOnly() { state.productsLowOnly = !state.productsLowOnly; render(); }
+function toggleCategoryPanel() { state.showCategoryPanel = !state.showCategoryPanel; render(); }
+
 function renderProducts() {
   const isAdmin = state.currentUser.role === 'admin';
   const categories = [...new Set(state.products.map(p => p.category).filter(Boolean))].sort();
   const search = state.productsSearch.trim().toLowerCase();
+  const cat = state.posCategoryAdmin || 'all';
   const filtered = state.products.filter(p => {
-    const matchesCategory = state.posCategoryAdmin === undefined || state.posCategoryAdmin === 'all' || p.category === state.posCategoryAdmin;
-    const matchesSearch = !search || p.name.toLowerCase().includes(search) || (p.barcode && p.barcode.includes(search));
-    return matchesCategory && matchesSearch;
+    if (cat !== 'all' && p.category !== cat) return false;
+    if (state.productsLowOnly && !isLowStock(p)) return false;
+    return !search || p.name.toLowerCase().includes(search) || (p.barcode && p.barcode.includes(search));
   });
+  const lowCount = state.products.filter(isLowStock).length;
+  const stockValue = state.products.reduce((s, p) => s + (Number(p.cost_price) || 0) * Math.max(0, Number(p.stock) || 0), 0);
 
   const rows = filtered.map(p => {
-    if (!isAdmin) {
-      // Кассиру доступен только просмотр — без редактирования и удаления
-      return `
-      <tr class="${isLowStock(p) ? 'low-row' : ''}">
-        <td style="width:60px;">${p.image_url ? `<img src="${esc(p.image_url)}" class="thumb-img" alt="">` : `<div class="thumb-placeholder">🍺</div>`}</td>
-        <td>${esc(p.name)}</td>
-        <td>${esc(p.category || '—')}</td>
-        <td class="mono">${esc(p.barcode || '—')}</td>
-        <td class="num">${fmt(p.price)}</td>
-        <td class="num">${p.stock} ${p.unit === 'л' ? 'л' : ''}</td>
-      </tr>`;
-    }
+    const st = productStockInfo(p);
+    const cost = Number(p.cost_price) || 0;
+    const markup = cost > 0 ? Math.round((Number(p.price) - cost) / cost * 100) : null;
     return `
-    <tr class="${isLowStock(p) ? 'low-row' : ''}">
-      <td style="width:120px;">
-        <div class="thumb-cell">
-          ${p.image_url ? `<img src="${esc(p.image_url)}" class="thumb-img" alt="">` : `<div class="thumb-placeholder">🍺</div>`}
-          <div style="display:flex; flex-direction:column; gap:2px;">
-            <input type="file" accept="image/*" id="img-input-${p.id}" style="display:none" onchange="uploadProductImage(${p.id}, this.files[0])">
-            <button class="btn btn-ghost btn-sm" onclick="document.getElementById('img-input-${p.id}').click()">Фото</button>
-            ${p.image_url ? `<button class="thumb-remove" onclick="removeProductImage(${p.id})">убрать</button>` : ''}
-          </div>
+    <button class="pl-row ${st.cls !== 'ok' ? 'warn' : ''}" onclick="openProductSheet(${p.id})">
+      ${productThumb(p, 'pl-thumb')}
+      <div class="pl-main">
+        <div class="pl-name">${esc(p.name)}</div>
+        <div class="pl-sub">
+          <span class="pl-cat">${esc(p.category || 'Без категории')}</span>
+          ${p.barcode ? `<span class="mono">${esc(p.barcode)}</span>` : '<span class="pl-nobc">без штрихкода</span>'}
         </div>
-      </td>
-      <td><input type="text" value="${esc(p.name)}" onchange="updateProduct(${p.id},'name', this.value)"></td>
-      <td style="width:170px;">
-        <div style="display:flex; gap:4px; align-items:center;">
-          <select style="flex:1;" onchange="updateProduct(${p.id},'category', this.value)">
-            ${categories.map(c => `<option value="${esc(c)}" ${p.category === c ? 'selected' : ''}>${esc(c)}</option>`).join('')}
-          </select>
-          <button type="button" class="icon-btn" title="Новая категория" onclick="addCategoryOptionForRow(${p.id}, this)">+</button>
-        </div>
-      </td>
-      <td style="width:150px;"><input type="text" class="mono" value="${esc(p.barcode || '')}" placeholder="—" onchange="updateProduct(${p.id},'barcode', this.value)"></td>
-      <td style="width:110px;"><input class="num" type="number" min="0" step="0.01" value="${p.cost_price || 0}" onchange="updateProduct(${p.id},'cost_price', this.value)"></td>
-      <td style="width:90px;">
-        <select onchange="updateProduct(${p.id},'unit', this.value)">
-          <option value="шт" ${p.unit !== 'л' ? 'selected' : ''}>шт</option>
-          <option value="л" ${p.unit === 'л' ? 'selected' : ''}>л</option>
-        </select>
-      </td>
-      <td style="width:110px;">${p.unit === 'л' ? `<input class="num" type="number" min="0" step="0.1" value="${p.volume_liters || 1}" onchange="updateProduct(${p.id},'volume_liters', this.value)">` : '<span class="pec-label" style="margin:0;">—</span>'}</td>
-      <td style="width:120px;"><input class="num" type="number" min="0" step="0.01" value="${p.price}" onchange="updateProduct(${p.id},'price', this.value)"></td>
-      <td style="width:100px;"><input class="num" type="number" min="0" step="0.01" value="${p.stock}" onchange="updateProduct(${p.id},'stock', this.value)"> ${p.unit === 'л' ? '<span class="pec-label" style="margin:0;">л</span>' : ''}</td>
-      <td style="width:60px;"><button class="btn btn-danger btn-sm" onclick="deleteProduct(${p.id})">Удалить</button></td>
-    </tr>`;
+        ${isAdmin ? `<div class="pl-cost">закуп ${cost > 0 ? fmt(cost) : '—'}${markup !== null ? ` · наценка ${markup}%` : ''}</div>` : ''}
+      </div>
+      <div class="pl-right">
+        <div class="pl-price">${fmt(p.price)}${p.unit === 'л' ? `<small>/${Number(p.volume_liters || 1)} л</small>` : ''}</div>
+        <span class="pl-stock ${st.cls}">${st.text}</span>
+      </div>
+      <span class="pl-chev" aria-hidden="true">›</span>
+    </button>`;
   }).join('');
 
-  /* Карточный вид для планшетов, моноблоков и телефонов — вместо тесной таблицы */
-  const cards = filtered.map(p => {
-    const photoBlock = p.image_url
-      ? `<img src="${esc(p.image_url)}" class="thumb-img" alt="">`
-      : `<div class="thumb-placeholder">🍺</div>`;
-    const isDraft = p.unit === 'л';
-    if (!isAdmin) {
-      return `
-      <div class="product-view-card ${isLowStock(p) ? 'low' : ''}">
-        <div class="pvc-top">
-          ${photoBlock}
-          <div class="pvc-name">${esc(p.name)}</div>
-        </div>
-        <div class="pvc-row"><span>Категория</span><span>${esc(p.category || '—')}</span></div>
-        <div class="pvc-row"><span>Штрихкод</span><span class="mono">${esc(p.barcode || '—')}</span></div>
-        <div class="pvc-row"><span>Цена</span><span class="num">${fmt(p.price)}</span></div>
-        <div class="pvc-row"><span>Остаток</span><span class="num">${p.stock} ${isDraft ? 'л' : 'шт'}</span></div>
-      </div>`;
-    }
-    return `
-    <div class="product-edit-card ${isLowStock(p) ? 'low' : ''}">
-      <div class="pec-head">
-        <div class="thumb-cell">
-          ${photoBlock}
-          <div style="display:flex; flex-direction:column; gap:2px;">
-            <input type="file" accept="image/*" id="img-input-card-${p.id}" style="display:none" onchange="uploadProductImage(${p.id}, this.files[0])">
-            <button class="btn btn-ghost btn-sm" onclick="document.getElementById('img-input-card-${p.id}').click()">Фото</button>
-            ${p.image_url ? `<button class="thumb-remove" onclick="removeProductImage(${p.id})">убрать</button>` : ''}
-          </div>
-        </div>
-        <button class="btn btn-danger btn-sm" onclick="deleteProduct(${p.id})">Удалить</button>
-      </div>
-      <label class="pec-label">Название</label>
-      <input type="text" value="${esc(p.name)}" onchange="updateProduct(${p.id},'name', this.value)">
-      <label class="pec-label">Категория</label>
-      <div class="pec-inline">
-        <select onchange="updateProduct(${p.id},'category', this.value)">
-          ${categories.map(c => `<option value="${esc(c)}" ${p.category === c ? 'selected' : ''}>${esc(c)}</option>`).join('')}
-        </select>
-        <button type="button" class="icon-btn" title="Новая категория" onclick="addCategoryOptionForRow(${p.id}, this)">+</button>
-      </div>
-      <div class="pec-grid-2">
-        <div><label class="pec-label">Штрихкод</label><input type="text" class="mono" value="${esc(p.barcode || '')}" placeholder="—" onchange="updateProduct(${p.id},'barcode', this.value)"></div>
-        <div><label class="pec-label">Себестоимость, ₸</label><input class="num" type="number" min="0" step="0.01" value="${p.cost_price || 0}" onchange="updateProduct(${p.id},'cost_price', this.value)"></div>
-      </div>
-      <label class="pec-label">Единица товара</label>
-      <div class="pec-grid-2">
-        <select onchange="updateProduct(${p.id},'unit', this.value)">
-          <option value="шт" ${!isDraft ? 'selected' : ''}>Штуки (шт)</option>
-          <option value="л" ${isDraft ? 'selected' : ''}>Разливное (л)</option>
-        </select>
-        ${isDraft ? `<input class="num" type="number" min="0" step="0.1" value="${p.volume_liters || 1}" placeholder="Объём порции, л" onchange="updateProduct(${p.id},'volume_liters', this.value)">` : ''}
-      </div>
-      <div class="pec-grid-2">
-        <div><label class="pec-label">Цена, ₸</label><input class="num" type="number" min="0" step="0.01" value="${p.price}" onchange="updateProduct(${p.id},'price', this.value)"></div>
-        <div><label class="pec-label">Остаток${isDraft ? ', л' : ''}</label><input class="num" type="number" min="0" step="${isDraft ? '0.1' : '1'}" value="${p.stock}" onchange="updateProduct(${p.id},'stock', this.value)"></div>
-      </div>
-    </div>`;
+  const chips = ['all', ...categories].map(c => {
+    const count = c === 'all' ? state.products.length : state.products.filter(p => p.category === c).length;
+    return `<button class="pos2-chip ${cat === c ? 'active' : ''}" onclick="setProductsCategory('${esc(c).replace(/'/g, "\\'")}')">${c === 'all' ? 'Все' : esc(c)}<span>${count}</span></button>`;
   }).join('');
-
-  const categoryFilterOptions = categories.map(c => `<option value="${esc(c)}" ${state.posCategoryAdmin === c ? 'selected' : ''}>${esc(c)}</option>`).join('');
-  const newProductCategoryOptions = categories.map(c => `<option value="${esc(c)}">${esc(c)}</option>`).join('') || `<option value="Пиво">Пиво</option>`;
 
   const categoryManageRows = categories.map(c => {
     const count = state.products.filter(p => p.category === c).length;
     const markup = state.categoryMarkups[c] !== undefined ? state.categoryMarkups[c] : '';
+    const q = esc(c).replace(/'/g, "\\'");
     return `
     <div class="cat-manage-row">
       <div class="cat-manage-title">
@@ -1148,16 +1089,14 @@ function renderProducts() {
         <span class="cat-manage-count">${count} шт.</span>
       </div>
       <div class="cat-manage-actions">
-        ${isAdmin ? `
         <div class="cat-markup-cell">
-          <input type="number" class="num" step="0.1" min="0" placeholder="0" value="${markup}"
-            onchange="updateCategoryMarkup('${esc(c).replace(/'/g, "\\'")}', this.value)">
+          <input type="number" inputmode="decimal" class="num" step="0.1" min="0" placeholder="0" value="${markup}" onchange="updateCategoryMarkup('${q}', this.value)">
           <span>%</span>
-          <button class="btn btn-hop btn-sm" onclick="applyCategoryMarkup('${esc(c).replace(/'/g, "\\'")}')">Применить</button>
-        </div>` : ''}
+          <button class="btn btn-hop btn-sm" onclick="applyCategoryMarkup('${q}')">Применить</button>
+        </div>
         <div class="cat-manage-buttons">
-          <button class="btn btn-ghost btn-sm" onclick="renameCategory('${esc(c).replace(/'/g, "\\'")}')">Переименовать</button>
-          <button class="btn btn-danger btn-sm" onclick="deleteCategory('${esc(c).replace(/'/g, "\\'")}')">Удалить</button>
+          <button class="btn btn-ghost btn-sm" onclick="renameCategory('${q}')">Переименовать</button>
+          <button class="btn btn-danger btn-sm" onclick="deleteCategory('${q}')">Удалить</button>
         </div>
       </div>
     </div>`;
@@ -1165,42 +1104,263 @@ function renderProducts() {
 
   return `
   <div class="page-head">
-    <div><h2>Товары</h2><div class="page-sub">${isAdmin ? 'Учёт ассортимента, фото, категорий, себестоимости и остатков' : 'Можно добавлять новые товары. Изменение и удаление — только у администратора'} (${state.products.length} шт.)</div></div>
+    <div><h2>Товары</h2><div class="page-sub">${isAdmin ? 'Нажмите на товар, чтобы изменить цену, остаток, фото' : 'Просмотр ассортимента. Добавлять новые товары можно кнопкой «+»'}</div></div>
+    ${isAdmin && categories.length ? `<button class="btn btn-ghost pl-cat-toggle ${state.showCategoryPanel ? 'on' : ''}" onclick="toggleCategoryPanel()">Категории и наценка ${state.showCategoryPanel ? '▴' : '▾'}</button>` : ''}
   </div>
-  ${isAdmin && categories.length > 0 ? `
-  <div class="panel" style="margin-bottom:16px;">
-    <h3 style="font-size:0.95rem; margin-bottom:4px;">Категории и наценка</h3>
-    <div class="page-sub" style="margin-bottom:10px;">Наценка применяется к товарам с указанной себестоимостью: цена = себестоимость × (1 + наценка/100)</div>
+
+  ${isAdmin && state.showCategoryPanel && categories.length ? `
+  <div class="panel pl-cat-panel">
+    <div class="page-sub" style="margin:0 0 10px;">Цена = себестоимость × (1 + наценка/100). Применяется к товарам, у которых указана себестоимость.</div>
     <div class="cat-manage-list">${categoryManageRows}</div>
   </div>` : ''}
-  <div class="panel">
-    <div class="table-toolbar">
-      <input id="products-search-input" class="pos-search" style="max-width:280px;" type="text" placeholder="Поиск по названию или штрихкоду…" value="${esc(state.productsSearch)}" oninput="handleProductsSearchInput(this.value)">
-      <div class="filters">
-        <select onchange="state.posCategoryAdmin=this.value; render();">
-          <option value="all">Все категории</option>
-          ${categoryFilterOptions}
-        </select>
+
+  <div class="pl-stats">
+    <div class="pl-stat"><span>Товаров</span><b>${state.products.length}</b></div>
+    <button class="pl-stat ${state.productsLowOnly ? 'active' : ''} ${lowCount ? 'alert' : ''}" onclick="toggleProductsLowOnly()"><span>Заканчиваются</span><b>${lowCount}</b></button>
+    ${isAdmin ? `<div class="pl-stat"><span>Склад по закупу</span><b>${fmt(Math.round(stockValue))}</b></div>` : ''}
+  </div>
+
+  <div class="pl-toolbar">
+    <div class="pos2-search pl-search">
+      <span class="pos2-search-ico">${icon('search', 20)}</span>
+      <input id="products-search-input" type="text" autocomplete="off" placeholder="Название или штрихкод" value="${esc(state.productsSearch)}" oninput="handleProductsSearchInput(this.value)">
+      ${state.productsSearch ? `<button class="pos2-search-clear" onclick="handleProductsSearchInput('')" aria-label="Очистить">×</button>` : ''}
+      <button type="button" class="pos2-camera" onclick="scanIntoProductsSearch()" title="Найти по штрихкоду камерой">${CAMERA_ICON}</button>
+    </div>
+    ${categories.length ? `<div class="pos2-chips">${chips}</div>` : ''}
+  </div>
+
+  ${state.productsLowOnly ? `<div class="pl-filter-note">Показаны только товары, которые заканчиваются · <button class="linklike" onclick="toggleProductsLowOnly()">показать все</button></div>` : ''}
+
+  <div class="pl-list">${rows}</div>
+  ${state.products.length === 0 ? '<div class="panel"><div class="empty-state">Товаров пока нет — нажмите «+», чтобы добавить первый.</div></div>' : ''}
+  ${state.products.length > 0 && filtered.length === 0 ? '<div class="panel"><div class="empty-state">Ничего не найдено.</div></div>' : ''}
+
+  <button class="fab" onclick="openAddProductModal('products')" aria-label="Добавить товар" title="Добавить товар">+</button>
+  ${state.productEditId ? renderProductSheet(categories, isAdmin) : ''}
+  ${state.showAddProductModal ? renderAddProductModalAnywhere() : ''}`;
+}
+
+function scanIntoProductsSearch() {
+  openCameraScanner({
+    title: 'Найти товар по штрихкоду',
+    continuous: false,
+    onCode: (code) => {
+      const p = findProductByBarcode(code);
+      state.productsSearch = '';
+      if (p) setTimeout(() => openProductSheet(p.id), 0);
+      else setTimeout(() => { showToast('Штрихкод «' + code + '» не найден — можно создать товар'); openAddProductModal('products', preferredBarcode(code)); }, 0);
+      return { ok: !!p, close: true };
+    },
+  });
+}
+
+/* ---- Окно товара (редактирование у админа, просмотр у кассира) ---- */
+function openProductSheet(id) {
+  const p = state.products.find(x => x.id === id);
+  if (!p) return;
+  state.productEditId = id;
+  state.productDraft = {
+    name: p.name || '',
+    category: p.category || 'Без категории',
+    barcode: p.barcode || '',
+    unit: p.unit === 'л' ? 'л' : 'шт',
+    volume_liters: p.volume_liters != null ? String(Number(p.volume_liters)) : '1',
+    cost_price: Number(p.cost_price) > 0 ? String(Number(p.cost_price)) : '',
+    price: String(Number(p.price)),
+    stock: String(Number(p.stock)),
+  };
+  render();
+}
+function closeProductSheet() {
+  state.productEditId = null;
+  state.productDraft = null;
+  render();
+}
+function setProductDraft(field, value, rerender) {
+  if (!state.productDraft) return;
+  state.productDraft[field] = value;
+  if (rerender) render(); else updateMarginHint();
+}
+function updateMarginHint() {
+  const el = document.getElementById('pe-margin');
+  if (!el || !state.productDraft) return;
+  el.innerHTML = marginHintHtml(state.productDraft);
+}
+function marginHintHtml(d) {
+  const cost = Number(String(d.cost_price).replace(',', '.')) || 0;
+  const price = Number(String(d.price).replace(',', '.')) || 0;
+  if (!(cost > 0 && price > 0)) return '<span>Укажите себестоимость — покажу наценку и прибыль с единицы</span>';
+  const profit = price - cost;
+  const markup = Math.round(profit / cost * 100);
+  return `<span>Наценка <b>${markup}%</b></span><span>Прибыль с ед. <b class="${profit < 0 ? 'neg' : ''}">${fmt(+profit.toFixed(2))}</b></span>`;
+}
+function stepProductDraft(field, delta) {
+  const d = state.productDraft;
+  if (!d) return;
+  const v = Math.max(0, +((Number(String(d[field]).replace(',', '.')) || 0) + delta).toFixed(2));
+  d[field] = String(v);
+  const el = document.getElementById('pe-' + field);
+  if (el) el.value = d[field];
+}
+function addCategoryToSheet() {
+  const val = prompt('Название новой категории:');
+  if (!val || !val.trim()) return;
+  setProductDraft('category', val.trim(), true);
+}
+async function saveProductSheet() {
+  const id = state.productEditId;
+  const d = state.productDraft;
+  if (!id || !d) return;
+  const num = v => Number(String(v).replace(',', '.'));
+  if (!d.name.trim()) { showToast('Укажите название'); return; }
+  if (!(num(d.price) > 0)) { showToast('Укажите цену больше нуля'); return; }
+  if (d.unit !== 'л' && !Number.isInteger(num(d.stock))) { showToast('Остаток в штуках должен быть целым'); return; }
+  const body = {
+    name: d.name.trim(),
+    category: d.category,
+    barcode: d.barcode.trim(),
+    unit: d.unit,
+    price: num(d.price),
+    stock: Math.max(0, num(d.stock) || 0),
+    cost_price: Math.max(0, num(d.cost_price) || 0),
+  };
+  if (d.unit === 'л') body.volume_liters = num(d.volume_liters) || 1;
+  try {
+    const updated = await api('/products/' + id, { method: 'PUT', body });
+    const idx = state.products.findIndex(p => p.id === id);
+    if (idx >= 0) state.products[idx] = updated;
+    state.productEditId = null;
+    state.productDraft = null;
+    render();
+    showToast('Сохранено');
+  } catch (err) { showToast(err.message); }
+}
+async function deleteProductFromSheet() {
+  const id = state.productEditId;
+  const p = state.products.find(x => x.id === id);
+  if (!p || !confirm('Удалить «' + p.name + '» из учёта?')) return;
+  try {
+    await api('/products/' + id, { method: 'DELETE' });
+    state.products = state.products.filter(x => x.id !== id);
+    state.productEditId = null;
+    state.productDraft = null;
+    render();
+    showToast('Товар удалён');
+  } catch (err) { showToast(err.message); }
+}
+
+function renderProductSheet(categories, isAdmin) {
+  const p = state.products.find(x => x.id === state.productEditId);
+  if (!p) return '';
+  const d = state.productDraft;
+  const st = productStockInfo(p);
+  const isDraft = d.unit === 'л';
+  const cats = [...new Set([...categories, d.category].filter(Boolean))].sort();
+
+  const photo = `
+    <div class="pe-photo">
+      ${productThumb(p, 'pe-photo-img')}
+      ${isAdmin ? `
+      <div class="pe-photo-actions">
+        <input type="file" accept="image/*" id="pe-img-input" style="display:none" onchange="uploadProductImage(${p.id}, this.files[0])">
+        <button class="btn btn-ghost btn-sm" onclick="document.getElementById('pe-img-input').click()">${p.image_url ? 'Сменить фото' : 'Добавить фото'}</button>
+        ${p.image_url ? `<button class="thumb-remove" onclick="removeProductImage(${p.id})">убрать фото</button>` : ''}
+      </div>` : ''}
+    </div>`;
+
+  if (!isAdmin) {
+    return `
+    <div class="modal-overlay sheet-overlay" onclick="if(event.target===this) closeProductSheet()">
+      <div class="sheet" role="dialog" aria-label="${esc(p.name)}">
+        <div class="sheet-head"><h3>${esc(p.name)}</h3><button class="pay2-close sheet-close" onclick="closeProductSheet()" aria-label="Закрыть">×</button></div>
+        <div class="sheet-body">
+          ${photo}
+          <div class="pvc-row"><span>Категория</span><span>${esc(p.category || '—')}</span></div>
+          <div class="pvc-row"><span>Штрихкод</span><span class="mono">${esc(p.barcode || '—')}</span></div>
+          <div class="pvc-row"><span>Цена</span><span class="num">${fmt(p.price)}</span></div>
+          <div class="pvc-row"><span>Остаток</span><span class="pl-stock ${st.cls}">${st.text}</span></div>
+          <div class="page-sub" style="margin-top:12px;">Изменять товары может только администратор.</div>
+        </div>
+        <div class="sheet-actions"><button class="btn btn-primary" style="flex:1;" onclick="closeProductSheet()">Закрыть</button></div>
+      </div>
+    </div>`;
+  }
+
+  return `
+  <div class="modal-overlay sheet-overlay" onclick="if(event.target===this) closeProductSheet()">
+    <div class="sheet" role="dialog" aria-label="Товар">
+      <div class="sheet-head">
+        <h3>Товар</h3>
+        <button class="pay2-close sheet-close" onclick="closeProductSheet()" aria-label="Закрыть">×</button>
+      </div>
+      <div class="sheet-body">
+        ${photo}
+        <div class="field"><label>Название</label>
+          <input id="pe-name" type="text" value="${esc(d.name)}" oninput="setProductDraft('name', this.value)">
+        </div>
+        <div class="pe-grid">
+          <div class="field"><label>Категория</label>
+            <div class="pe-inline">
+              <select onchange="setProductDraft('category', this.value)">
+                ${cats.map(c => `<option value="${esc(c)}" ${d.category === c ? 'selected' : ''}>${esc(c)}</option>`).join('')}
+              </select>
+              <button type="button" class="icon-btn pe-icon" title="Новая категория" onclick="addCategoryToSheet()">+</button>
+            </div>
+          </div>
+          <div class="field"><label>Штрихкод</label>
+            <div class="pe-inline">
+              <input id="pe-barcode" type="text" class="mono" value="${esc(d.barcode)}" placeholder="—" oninput="setProductDraft('barcode', this.value)" onchange="setProductDraft('barcode', this.value)">
+              <button type="button" class="icon-btn pe-icon" title="Сканировать" onclick="scanIntoInput('pe-barcode')">${CAMERA_ICON}</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="field"><label>Как продаётся</label>
+          <div class="pe-seg">
+            <button class="${!isDraft ? 'active' : ''}" onclick="setProductDraft('unit', 'шт', true)">Штучно (шт)</button>
+            <button class="${isDraft ? 'active' : ''}" onclick="setProductDraft('unit', 'л', true)">Разливное (л)</button>
+          </div>
+        </div>
+        ${isDraft ? `
+        <div class="field"><label>Объём одной порции, л</label>
+          <input type="number" inputmode="decimal" min="0" step="0.1" value="${esc(d.volume_liters)}" oninput="setProductDraft('volume_liters', this.value)">
+        </div>` : ''}
+
+        <div class="pe-grid">
+          <div class="field"><label>Себестоимость, ₸${isDraft ? '/порция' : ''}</label>
+            <input type="number" inputmode="decimal" min="0" step="0.01" value="${esc(d.cost_price)}" placeholder="0" oninput="setProductDraft('cost_price', this.value)">
+          </div>
+          <div class="field"><label>Цена продажи, ₸</label>
+            <input type="number" inputmode="decimal" min="0" step="0.01" class="pe-price" value="${esc(d.price)}" oninput="setProductDraft('price', this.value)">
+          </div>
+        </div>
+        <div class="pe-margin" id="pe-margin">${marginHintHtml(d)}</div>
+
+        <div class="field"><label>Остаток${isDraft ? ', л' : ', шт'}</label>
+          <div class="pe-stepper">
+            <button onclick="stepProductDraft('stock', -1)" aria-label="Меньше">−</button>
+            <input id="pe-stock" type="number" inputmode="decimal" min="0" step="${isDraft ? '0.1' : '1'}" value="${esc(d.stock)}" oninput="setProductDraft('stock', this.value)">
+            <button onclick="stepProductDraft('stock', 1)" aria-label="Больше">+</button>
+          </div>
+          <div class="page-sub" style="margin-top:6px;">Поступления лучше проводить через «Склад → Приход» — так останется история.</div>
+        </div>
+      </div>
+      <div class="sheet-actions">
+        <button class="btn btn-danger pe-del" onclick="deleteProductFromSheet()">${icon('trash', 18)}<span>Удалить</span></button>
+        <button class="btn btn-ghost" style="flex:1;" onclick="closeProductSheet()">Отмена</button>
+        <button class="btn btn-hop pe-save" onclick="saveProductSheet()">${icon('check', 20)} Сохранить</button>
       </div>
     </div>
-    <table class="products-table">
-      <thead><tr><th>Фото</th><th>Название</th><th>Категория</th><th>Штрихкод</th>${isAdmin ? '<th>Себестоимость</th><th>Ед.</th><th>Объём порции</th>' : ''}<th>Цена, ₸</th><th>Остаток</th>${isAdmin ? '<th></th>' : ''}</tr></thead>
-      <tbody>${rows || ''}</tbody>
-    </table>
-    <div class="products-cards">${cards || ''}</div>
-    ${state.products.length === 0 ? '<div class="empty-state">Товаров пока нет — нажмите «+», чтобы добавить первый.</div>' : ''}
-    ${state.products.length > 0 && filtered.length === 0 ? '<div class="empty-state">Ничего не найдено по заданным условиям.</div>' : ''}
-  </div>
-  <button class="fab" onclick="openAddProductModal('products')" aria-label="Добавить товар" title="Добавить товар">+</button>
-  ${state.showAddProductModal ? renderAddProductModal(newProductCategoryOptions, isAdmin) : ''}`;
+  </div>`;
 }
+
 function renderAddProductModalAnywhere() {
   const isAdmin = state.currentUser.role === 'admin';
   const categories = [...new Set(state.products.map(p => p.category).filter(Boolean))].sort();
   const options = categories.map(c => `<option value="${esc(c)}">${esc(c)}</option>`).join('') || `<option value="Пиво">Пиво</option>`;
   return renderAddProductModal(options, isAdmin);
 }
-
 function renderAddProductModal(newProductCategoryOptions, isAdmin) {
   const fromStock = state.addProductContext === 'stock';
   return `
