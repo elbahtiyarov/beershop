@@ -8,6 +8,8 @@ const productRoutes = require('./routes/products');
 const receiptRoutes = require('./routes/receipts');
 const userRoutes = require('./routes/users');
 const analyticsRoutes = require('./routes/analytics');
+const supplierRoutes = require('./routes/suppliers');
+const stockRoutes = require('./routes/stock');
 
 if (!process.env.JWT_SECRET || !process.env.DATABASE_URL) {
   console.error('Не заданы DATABASE_URL и/или JWT_SECRET. Скопируйте .env.example в .env и заполните значения.');
@@ -23,6 +25,8 @@ app.use('/api/products', productRoutes);
 app.use('/api/receipts', receiptRoutes);
 app.use('/api/users', userRoutes);
 app.use('/api/analytics', analyticsRoutes);
+app.use('/api/suppliers', supplierRoutes);
+app.use('/api/stock', stockRoutes);
 
 app.use(express.static(path.join(__dirname, '..', 'public')));
 app.get('*', (req, res) => {

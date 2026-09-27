@@ -35,6 +35,18 @@ let state = {
   toast: null,
   userFormError: '',
   scanFlash: '', // '', 'ok', 'error'
+  addProductContext: 'products', // 'products' | 'stock' — откуда открыто окно «Новый товар»
+  addProductPrefillBarcode: '',
+  // ---- Склад ----
+  stockTab: 'new', // 'new' | 'history' | 'suppliers'
+  stockDraft: loadStockDraft(),
+  stockSearch: '',
+  suppliers: [],
+  stockReceipts: [],
+  stockReceiptToShow: null,
+  showSupplierModal: false,
+  supplierEditId: null,
+  supplierFormError: '',
 };
 
 /* ============ API CLIENT ============ */
@@ -116,7 +128,12 @@ async function loadAll() {
 
 /* ============ CART / POS ============ */
 function findProductByBarcode(code) {
-  return state.products.find(p => p.barcode && p.barcode === code);
+  const candidates = barcodeCandidates(code);
+  for (const c of candidates) {
+    const p = state.products.find(p => p.barcode && p.barcode === c);
+    if (p) return p;
+  }
+  return null;
 }
 // Сколько «объёма» списывает со склада одна проданная единица товара:
 // для обычных товаров — 1 штука, для разливного («л») — объём порции (1л/1.5л/2л и т.д.)
@@ -167,6 +184,7 @@ function flashScan(kind) {
   setTimeout(() => { state.scanFlash = ''; render(); focusScanInput(); }, 450);
 }
 function focusScanInput() {
+  if (Scanner.open) return; // камера открыта — не вызываем клавиатуру на телефоне
   const el = document.getElementById('scan-input');
   if (el) el.focus();
 }
@@ -353,7 +371,8 @@ async function addProduct() {
   const name = document.getElementById('new-p-name').value.trim();
   const category = document.getElementById('new-p-category').value.trim();
   const price = Number(document.getElementById('new-p-price').value);
-  const stock = Number(document.getElementById('new-p-stock').value);
+  const stockEl = document.getElementById('new-p-stock');
+  const stock = stockEl ? Number(stockEl.value) : 0;
   const barcode = document.getElementById('new-p-barcode').value.trim();
   const costPriceEl = document.getElementById('new-p-cost');
   const costPrice = costPriceEl ? Number(costPriceEl.value) || 0 : 0;
@@ -366,6 +385,14 @@ async function addProduct() {
     const created = await api('/products', { method: 'POST', body: { name, price, stock: stock || 0, barcode: barcode || null, category: category || 'Пиво', cost_price: costPrice, unit, volume_liters: volumeLiters } });
     state.products.push(created);
     state.showAddProductModal = false;
+    if (state.addProductContext === 'stock') {
+      addToStockDraft(created.id, 1, { cost_price: costPrice || '', price: '' });
+      state.addProductContext = 'products';
+      state.addProductPrefillBarcode = '';
+      render();
+      showToast('Товар «' + created.name + '» создан и добавлен в приход');
+      return;
+    }
     render();
     showToast('Товар добавлен');
   } catch (err) { showToast(err.message); }
@@ -378,7 +405,9 @@ function toggleDraftFieldsInModal() {
   if (wrap) wrap.style.display = isDraft ? 'block' : 'none';
   if (stockLabel) stockLabel.textContent = isDraft ? 'Остаток, л' : 'Остаток';
 }
-function openAddProductModal() {
+function openAddProductModal(context, barcode) {
+  state.addProductContext = context === 'stock' ? 'stock' : 'products';
+  state.addProductPrefillBarcode = barcode || '';
   state.showAddProductModal = true;
   render();
   const el = document.getElementById('new-p-name');
@@ -386,6 +415,8 @@ function openAddProductModal() {
 }
 function closeAddProductModal() {
   state.showAddProductModal = false;
+  state.addProductContext = 'products';
+  state.addProductPrefillBarcode = '';
   render();
 }
 
@@ -511,6 +542,7 @@ async function setView(v) {
   if (v === 'trash' && state.currentUser.role === 'admin') await loadTrash();
   if (v === 'products' && state.currentUser.role === 'admin') await loadCategoryMarkups();
   if (v === 'analytics' && state.currentUser.role === 'admin') await loadAnalytics(state.analyticsPeriodDays);
+  if (v === 'stock') await loadStockData();
   render();
   if (v === 'pos') focusScanInput();
 }
@@ -566,7 +598,7 @@ function renderLogin() {
 /* ============ RENDER: SHELL / NAV ============ */
 function navItems() {
   const role = state.currentUser.role;
-  const items = [{ id: 'pos', label: 'Касса' }, { id: 'products', label: 'Товары' }];
+  const items = [{ id: 'pos', label: 'Касса' }, { id: 'products', label: 'Товары' }, { id: 'stock', label: 'Склад' }];
   items.push({ id: 'history', label: 'История чеков' });
   if (role === 'admin') items.push({ id: 'analytics', label: 'Показатели' });
   if (role === 'admin') items.push({ id: 'trash', label: 'Корзина' });
@@ -659,7 +691,7 @@ function renderPOS() {
     </div>
 
     <div class="kassa-toolbar ${flashClass}">
-      <span class="kassa-search-icon">📷</span>
+      <button type="button" class="kassa-camera-btn" onclick="openPosCamera()" title="Сканировать камерой" aria-label="Сканировать камерой">${CAMERA_ICON}</button>
       <input id="scan-input" class="kassa-search-input" type="text" inputmode="numeric"
         placeholder="Поиск по товару или сканируйте штрихкод"
         autofocus
@@ -1005,17 +1037,25 @@ function renderProducts() {
     ${state.products.length === 0 ? '<div class="empty-state">Товаров пока нет — нажмите «+», чтобы добавить первый.</div>' : ''}
     ${state.products.length > 0 && filtered.length === 0 ? '<div class="empty-state">Ничего не найдено по заданным условиям.</div>' : ''}
   </div>
-  <button class="fab" onclick="openAddProductModal()" aria-label="Добавить товар" title="Добавить товар">+</button>
+  <button class="fab" onclick="openAddProductModal('products')" aria-label="Добавить товар" title="Добавить товар">+</button>
   ${state.showAddProductModal ? renderAddProductModal(newProductCategoryOptions, isAdmin) : ''}`;
+}
+function renderAddProductModalAnywhere() {
+  const isAdmin = state.currentUser.role === 'admin';
+  const categories = [...new Set(state.products.map(p => p.category).filter(Boolean))].sort();
+  const options = categories.map(c => `<option value="${esc(c)}">${esc(c)}</option>`).join('') || `<option value="Пиво">Пиво</option>`;
+  return renderAddProductModal(options, isAdmin);
 }
 
 function renderAddProductModal(newProductCategoryOptions, isAdmin) {
+  const fromStock = state.addProductContext === 'stock';
   return `
   <div class="modal-overlay" onclick="if(event.target===this) closeAddProductModal()">
     <div class="modal-card add-product-modal">
       <div class="modal-close-row"><button class="icon-btn" onclick="closeAddProductModal()" aria-label="Закрыть">×</button></div>
       <div class="add-product-body">
         <h3 class="add-product-title">Новый товар</h3>
+        ${fromStock ? `<div class="stock-hint">Штрихкода нет в базе — заполните карточку товара. После сохранения он попадёт в «Товары» и сразу добавится в текущий приход.</div>` : ''}
         <div class="field">
           <label>Название</label>
           <input id="new-p-name" type="text" placeholder="Крафтовый эль 0.5л">
@@ -1027,7 +1067,13 @@ function renderAddProductModal(newProductCategoryOptions, isAdmin) {
             <button type="button" class="icon-btn" title="Новая категория" onclick="addNewCategoryOption()">+</button>
           </div>
         </div>
-        <div class="field"><label>Штрихкод</label><input id="new-p-barcode" type="text" placeholder="Скан. или вручную"></div>
+        <div class="field">
+          <label>Штрихкод</label>
+          <div style="display:flex; gap:6px; align-items:center;">
+            <input id="new-p-barcode" type="text" placeholder="Скан. или вручную" value="${esc(state.addProductPrefillBarcode || '')}" style="flex:1;">
+            <button type="button" class="icon-btn" title="Сканировать камерой" onclick="scanIntoInput('new-p-barcode')">${CAMERA_ICON}</button>
+          </div>
+        </div>
         ${isAdmin ? `<div class="field"><label>Себестоимость, ₸</label><input id="new-p-cost" type="number" min="0" placeholder="300"></div>` : ''}
         <div class="field">
           <label>Единица товара</label>
@@ -1041,11 +1087,11 @@ function renderAddProductModal(newProductCategoryOptions, isAdmin) {
           <input id="new-p-volume" type="number" min="0" step="0.1" placeholder="1.5">
         </div>
         <div class="field"><label>Цена, ₸</label><input id="new-p-price" type="number" min="0" placeholder="500"></div>
-        <div class="field"><label id="new-p-stock-label">Остаток</label><input id="new-p-stock" type="number" min="0" step="1" placeholder="20"></div>
+        ${fromStock ? '' : `<div class="field"><label id="new-p-stock-label">Остаток</label><input id="new-p-stock" type="number" min="0" step="1" placeholder="20"></div>`}
       </div>
       <div class="receipt-actions">
         <button class="btn btn-ghost" style="flex:1;" onclick="closeAddProductModal()">Отмена</button>
-        <button class="btn btn-hop" style="flex:1;" onclick="addProduct()">Добавить товар</button>
+        <button class="btn btn-hop" style="flex:1;" onclick="addProduct()">${fromStock ? 'Создать и добавить в приход' : 'Добавить товар'}</button>
       </div>
     </div>
   </div>`;
@@ -1260,6 +1306,714 @@ function renderReceiptModal() {
   </div>`;
 }
 
+/* ============ КАМЕРА: СКАНЕР ШТРИХКОДОВ И QR ============ */
+const CAMERA_ICON = `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7V5a2 2 0 0 1 2-2h2M17 3h2a2 2 0 0 1 2 2v2M21 17v2a2 2 0 0 1-2 2h-2M7 21H5a2 2 0 0 1-2-2v-2"/><path d="M7 8v8M10 8v8M13 8v8M16 8v8"/></svg>`;
+
+// Окно камеры живёт в отдельном контейнере вне #app — иначе render() пересоздавал бы видео.
+const Scanner = {
+  open: false,
+  instance: null,
+  continuous: false,
+  onCode: null,
+  lastCode: '',
+  lastAt: 0,
+  cameras: [],
+  cameraIndex: -1,
+};
+
+// Из QR/DataMatrix маркировки (GS1: 01 + GTIN-14 + ...) достаём обычный штрихкод EAN-13,
+// чтобы товар нашёлся и по коду маркировки, и по обычному штрихкоду.
+function barcodeCandidates(raw) {
+  const code = String(raw || '').replace(/[\u001d\u0000-\u001f]/g, '').trim();
+  const list = [code];
+  const gs1 = code.match(/^(?:\]d2|\]C1|\]Q3)?01(\d{14})/);
+  if (gs1) {
+    const gtin = gs1[1];
+    list.push(gtin);
+    if (gtin.startsWith('0')) list.push(gtin.slice(1)); // GTIN-14 → EAN-13
+  }
+  if (/^\d{14}$/.test(code) && code.startsWith('0')) list.push(code.slice(1));
+  return [...new Set(list.filter(Boolean))];
+}
+// Какой код сохранять в карточку нового товара: для маркировки — EAN-13, иначе сам код
+function preferredBarcode(raw) {
+  const c = barcodeCandidates(raw);
+  return (c[c.length - 1] || '').slice(0, 64);
+}
+
+function scannerBeep(ok) {
+  try {
+    const Ctx = window.AudioContext || window.webkitAudioContext;
+    if (!Ctx) return;
+    Scanner.audio = Scanner.audio || new Ctx();
+    const ctx = Scanner.audio;
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.frequency.value = ok ? 1250 : 380;
+    gain.gain.value = 0.08;
+    osc.connect(gain); gain.connect(ctx.destination);
+    osc.start();
+    osc.stop(ctx.currentTime + (ok ? 0.09 : 0.25));
+  } catch (e) { /* звук необязателен */ }
+  try { if (navigator.vibrate) navigator.vibrate(ok ? 60 : [80, 60, 80]); } catch (e) {}
+}
+
+function setScannerStatus(text, kind) {
+  const el = document.getElementById('scanner-status');
+  if (!el) return;
+  el.textContent = text;
+  el.className = 'scanner-status' + (kind ? ' ' + kind : '');
+}
+
+async function openCameraScanner({ title, continuous, onCode }) {
+  if (typeof Html5Qrcode === 'undefined') {
+    showToast('Модуль камеры не загрузился — проверьте интернет и обновите страницу');
+    return;
+  }
+  if (!window.isSecureContext) {
+    showToast('Камера работает только по https:// или на localhost');
+    return;
+  }
+  await closeCameraScanner();
+  let root = document.getElementById('scanner-root');
+  if (!root) { root = document.createElement('div'); root.id = 'scanner-root'; document.body.appendChild(root); }
+  root.innerHTML = `
+    <div class="scanner-overlay" onclick="if(event.target===this) closeCameraScanner()">
+      <div class="scanner-card" role="dialog" aria-label="${esc(title)}">
+        <div class="scanner-head">
+          <span>${esc(title)}</span>
+          <button class="icon-btn" onclick="closeCameraScanner()" aria-label="Закрыть">×</button>
+        </div>
+        <div class="scanner-video-wrap"><div id="scanner-video"></div></div>
+        <div id="scanner-status" class="scanner-status">Запускаю камеру…</div>
+        <div class="scanner-actions">
+          <button id="scanner-switch" class="btn btn-ghost" onclick="switchScannerCamera()" style="display:none;">Другая камера</button>
+          <button class="btn btn-hop" style="flex:1;" onclick="closeCameraScanner()">${continuous ? 'Готово' : 'Отмена'}</button>
+        </div>
+      </div>
+    </div>`;
+  Scanner.open = true;
+  Scanner.continuous = !!continuous;
+  Scanner.onCode = onCode;
+  Scanner.lastCode = '';
+  Scanner.lastAt = 0;
+  document.activeElement && document.activeElement.blur && document.activeElement.blur();
+
+  const F = window.Html5QrcodeSupportedFormats || {};
+  const formats = ['QR_CODE', 'EAN_13', 'EAN_8', 'UPC_A', 'UPC_E', 'CODE_128', 'CODE_39', 'CODE_93', 'ITF', 'DATA_MATRIX']
+    .map(k => F[k]).filter(v => v !== undefined);
+  Scanner.instance = new Html5Qrcode('scanner-video', {
+    verbose: false,
+    formatsToSupport: formats.length ? formats : undefined,
+    experimentalFeatures: { useBarCodeDetectorIfSupported: true },
+  });
+
+  try {
+    await startScannerCamera({ facingMode: 'environment' });
+  } catch (err) {
+    // Моноблоки/ноутбуки: задней камеры нет — берём первую доступную
+    try {
+      Scanner.cameras = await Html5Qrcode.getCameras();
+      if (!Scanner.cameras.length) throw new Error('Камера не найдена');
+      Scanner.cameraIndex = 0;
+      await startScannerCamera(Scanner.cameras[0].id);
+    } catch (err2) {
+      const msg = String(err2 && (err2.name || err2.message || err2));
+      setScannerStatus(/NotAllowed|Permission/i.test(msg)
+        ? 'Нет доступа к камере. Разрешите доступ в настройках браузера (значок замка в адресной строке) и попробуйте снова.'
+        : 'Камера не найдена или занята другим приложением.', 'error');
+      return;
+    }
+  }
+  setScannerStatus('Наведите камеру на штрихкод или QR-код');
+  // Показываем «Другая камера», если их несколько
+  try {
+    if (!Scanner.cameras.length) Scanner.cameras = await Html5Qrcode.getCameras();
+    const btn = document.getElementById('scanner-switch');
+    if (btn && Scanner.cameras.length > 1) btn.style.display = '';
+  } catch (e) {}
+}
+
+async function startScannerCamera(cameraConfig) {
+  await Scanner.instance.start(
+    cameraConfig,
+    {
+      fps: 12,
+      qrbox: (w, h) => {
+        const width = Math.floor(Math.min(w * 0.86, 380));
+        const height = Math.floor(Math.min(h * 0.62, 240, width));
+        return { width, height };
+      },
+      aspectRatio: 1.333,
+    },
+    onScannerDecoded,
+    () => { /* кадр без кода — это нормально */ }
+  );
+}
+
+async function switchScannerCamera() {
+  if (!Scanner.instance || Scanner.cameras.length < 2) return;
+  Scanner.cameraIndex = (Scanner.cameraIndex + 1) % Scanner.cameras.length;
+  try {
+    if (Scanner.instance.isScanning) await Scanner.instance.stop();
+    await startScannerCamera(Scanner.cameras[Scanner.cameraIndex].id);
+    setScannerStatus('Камера: ' + (Scanner.cameras[Scanner.cameraIndex].label || (Scanner.cameraIndex + 1)));
+  } catch (e) { setScannerStatus('Не удалось переключить камеру', 'error'); }
+}
+
+function onScannerDecoded(decodedText) {
+  const code = String(decodedText || '').trim();
+  if (!code || !Scanner.onCode) return;
+  const now = Date.now();
+  // Тот же код, пока он в кадре, не считываем повторно чаще раза в 1.8 сек
+  if (code === Scanner.lastCode && now - Scanner.lastAt < 1800) return;
+  Scanner.lastCode = code;
+  Scanner.lastAt = now;
+  const result = Scanner.onCode(code) || {};
+  scannerBeep(result.ok !== false);
+  if (result.close || !Scanner.continuous) { closeCameraScanner(); return; }
+  setScannerStatus(result.message || code, result.ok === false ? 'error' : 'ok');
+}
+
+async function closeCameraScanner() {
+  const inst = Scanner.instance;
+  Scanner.instance = null;
+  Scanner.open = false;
+  Scanner.onCode = null;
+  if (inst) {
+    try { if (inst.isScanning) await inst.stop(); } catch (e) {}
+    try { inst.clear(); } catch (e) {}
+  }
+  const root = document.getElementById('scanner-root');
+  if (root) root.innerHTML = '';
+  if (state.view === 'pos' && !state.receiptToShow && !state.showPaymentModal) focusScanInput();
+}
+
+// Касса: камера в режиме «сканирую подряд», каждый найденный товар +1 в чек
+function openPosCamera() {
+  openCameraScanner({
+    title: 'Сканер — касса',
+    continuous: true,
+    onCode: (code) => {
+      const p = findProductByBarcode(code);
+      if (!p) {
+        showToast('Штрихкод «' + code + '» не найден в базе товаров');
+        return { ok: false, message: 'Не найден: ' + code };
+      }
+      const before = state.cart.find(i => i.productId === p.id)?.qty || 0;
+      addToCart(p.id);
+      const after = state.cart.find(i => i.productId === p.id)?.qty || 0;
+      if (after === before) return { ok: false, message: 'Нет в наличии: ' + p.name };
+      return { ok: true, message: '✓ ' + p.name + ' — в чеке ' + after };
+    },
+  });
+}
+
+// Любое поле ввода: один скан → значение в поле
+function scanIntoInput(inputId) {
+  openCameraScanner({
+    title: 'Сканировать штрихкод',
+    continuous: false,
+    onCode: (code) => {
+      const el = document.getElementById(inputId);
+      if (el) { el.value = preferredBarcode(code); el.dispatchEvent(new Event('change')); }
+      return { ok: true, close: true };
+    },
+  });
+}
+
+/* ============ СКЛАД: ДАННЫЕ ============ */
+const STOCK_DRAFT_KEY = 'beershop_stock_draft';
+function emptyStockDraft() { return { supplierId: '', docNumber: '', note: '', items: [] }; }
+function loadStockDraft() {
+  try {
+    // ключ строкой: функция вызывается при создании state, раньше объявления константы
+    const d = JSON.parse(localStorage.getItem('beershop_stock_draft') || 'null');
+    if (d && Array.isArray(d.items)) return { ...emptyStockDraft(), ...d };
+  } catch (e) {}
+  return emptyStockDraft();
+}
+function saveStockDraft() {
+  try { localStorage.setItem(STOCK_DRAFT_KEY, JSON.stringify(state.stockDraft)); } catch (e) {}
+}
+
+async function loadStockData() {
+  try {
+    const [suppliers, receipts] = await Promise.all([api('/suppliers'), api('/stock/receipts')]);
+    state.suppliers = suppliers;
+    state.stockReceipts = receipts;
+  } catch (err) { if (err.message !== 'unauthorized') showToast(err.message); }
+  // Позиции черновика, чьи товары удалили, убираем
+  const before = state.stockDraft.items.length;
+  state.stockDraft.items = state.stockDraft.items.filter(i => state.products.some(p => p.id === i.productId));
+  if (state.stockDraft.items.length !== before) saveStockDraft();
+}
+function setStockTab(tab) {
+  state.stockTab = tab;
+  render();
+}
+
+function addToStockDraft(productId, qty = 1, extra = {}) {
+  const p = state.products.find(p => p.id === productId);
+  if (!p) return null;
+  let item = state.stockDraft.items.find(i => i.productId === productId);
+  if (item) {
+    item.qty = +(Number(item.qty || 0) + qty).toFixed(2);
+    // поднимаем позицию наверх — видно, что только что сканировали
+    state.stockDraft.items = [item, ...state.stockDraft.items.filter(i => i !== item)];
+  } else {
+    item = {
+      productId,
+      qty,
+      cost_price: extra.cost_price !== undefined ? extra.cost_price : (Number(p.cost_price) > 0 ? Number(p.cost_price) : ''),
+      price: extra.price !== undefined ? extra.price : '',
+    };
+    state.stockDraft.items.unshift(item);
+  }
+  saveStockDraft();
+  render();
+  return item;
+}
+function updateStockDraftItem(productId, field, value) {
+  const item = state.stockDraft.items.find(i => i.productId === productId);
+  if (!item) return;
+  if (field === 'qty') {
+    const n = Number(String(value).replace(',', '.'));
+    item.qty = n > 0 ? n : item.qty;
+  } else {
+    const n = Number(String(value).replace(',', '.'));
+    item[field] = value === '' || Number.isNaN(n) ? '' : n;
+  }
+  saveStockDraft();
+  render();
+}
+function changeStockDraftQty(productId, delta) {
+  const item = state.stockDraft.items.find(i => i.productId === productId);
+  if (!item) return;
+  const next = +(Number(item.qty) + delta).toFixed(2);
+  if (next <= 0) { removeStockDraftItem(productId); return; }
+  item.qty = next;
+  saveStockDraft();
+  render();
+}
+function removeStockDraftItem(productId) {
+  state.stockDraft.items = state.stockDraft.items.filter(i => i.productId !== productId);
+  saveStockDraft();
+  render();
+}
+function setStockDraftField(field, value) {
+  state.stockDraft[field] = value;
+  saveStockDraft();
+}
+function clearStockDraft() {
+  if (state.stockDraft.items.length && !confirm('Очистить текущий приход?')) return;
+  state.stockDraft = emptyStockDraft();
+  saveStockDraft();
+  render();
+}
+
+// Скан (камерой, USB-сканером или ввод кода вручную) в приход
+function handleStockCode(rawCode, fromCamera) {
+  const code = String(rawCode || '').trim();
+  if (!code) return { ok: false };
+  const p = findProductByBarcode(code);
+  if (p) {
+    const item = addToStockDraft(p.id, 1);
+    state.stockSearch = '';
+    if (!fromCamera) { render(); focusStockSearch(); }
+    return { ok: true, message: '✓ ' + p.name + ' — в приходе ' + formatQty(item.qty, p.unit) };
+  }
+  // Новый товар: открываем карточку со штрихкодом, после сохранения он добавится в приход
+  state.stockSearch = '';
+  if (fromCamera) {
+    setTimeout(() => openAddProductModal('stock', preferredBarcode(code)), 0);
+    return { ok: false, close: true };
+  }
+  openAddProductModal('stock', preferredBarcode(code));
+  return { ok: false };
+}
+function openStockCamera() {
+  openCameraScanner({
+    title: 'Сканер — приход',
+    continuous: true,
+    onCode: (code) => handleStockCode(code, true),
+  });
+}
+function handleStockSearchKey(event, value) {
+  if (event.key !== 'Enter') return;
+  event.preventDefault();
+  const v = value.trim();
+  if (!v) return;
+  // Похоже на код (цифры/длинная строка без пробелов) — ищем по штрихкоду
+  if (/^\S{6,}$/.test(v) && (findProductByBarcode(v) || /^\d+$/.test(v))) { handleStockCode(v, false); return; }
+  const matches = stockSearchMatches();
+  if (matches.length === 1) { addToStockDraft(matches[0].id, 1); state.stockSearch = ''; render(); focusStockSearch(); }
+}
+function handleStockSearchInput(value) {
+  state.stockSearch = value;
+  render();
+  focusStockSearch();
+}
+function focusStockSearch() {
+  const el = document.getElementById('stock-search-input');
+  if (el) { el.focus(); const l = el.value.length; try { el.setSelectionRange(l, l); } catch (e) {} }
+}
+function pickStockSearchResult(productId) {
+  addToStockDraft(productId, 1);
+  state.stockSearch = '';
+  render();
+  focusStockSearch();
+}
+function stockSearchMatches() {
+  const q = state.stockSearch.trim().toLowerCase();
+  if (!q) return [];
+  return state.products
+    .filter(p => p.name.toLowerCase().includes(q) || (p.barcode && p.barcode.includes(q)))
+    .slice(0, 8);
+}
+function formatQty(qty, unit) {
+  const n = Number(qty || 0);
+  const s = Number.isInteger(n) ? String(n) : n.toFixed(2).replace(/\.?0+$/, '');
+  return s + ' ' + (unit === 'л' ? 'л' : 'шт');
+}
+
+async function postStockReceipt() {
+  const d = state.stockDraft;
+  if (!d.items.length) { showToast('Приход пуст — отсканируйте товары'); return; }
+  const isAdmin = state.currentUser.role === 'admin';
+  if (!d.supplierId && !confirm('Поставщик не выбран. Провести приход без поставщика?')) return;
+  for (const i of d.items) {
+    const p = state.products.find(p => p.id === i.productId);
+    if (p && p.unit !== 'л' && !Number.isInteger(Number(i.qty))) {
+      showToast('Количество «' + p.name + '» должно быть целым'); return;
+    }
+  }
+  const totalQty = d.items.length;
+  if (!confirm('Провести приход: ' + totalQty + ' поз.' + (isAdmin ? ' на сумму ' + fmt(stockDraftTotal()) : '') + '? Остатки увеличатся.')) return;
+  try {
+    const result = await api('/stock/receipts', {
+      method: 'POST',
+      body: {
+        supplier_id: d.supplierId ? Number(d.supplierId) : null,
+        doc_number: d.docNumber,
+        note: d.note,
+        items: d.items.map(i => ({ productId: i.productId, qty: Number(i.qty), cost_price: i.cost_price === '' ? null : Number(i.cost_price), price: i.price === '' ? null : Number(i.price) })),
+      },
+    });
+    // Обновляем товары локально (новые остатки, себестоимость, цены)
+    (result.products || []).forEach(up => {
+      const idx = state.products.findIndex(p => p.id === up.id);
+      if (idx >= 0) state.products[idx] = up;
+    });
+    delete result.products;
+    state.stockReceipts.unshift(result);
+    const sup = state.suppliers.find(s => s.id === result.supplier_id);
+    if (sup) { sup.receipts_count = (sup.receipts_count || 0) + 1; sup.last_at = result.created_at; }
+    state.stockDraft = emptyStockDraft();
+    saveStockDraft();
+    state.stockReceiptToShow = result;
+    render();
+    showToast('Приход №' + result.id + ' проведён, остатки обновлены');
+  } catch (err) { showToast(err.message); }
+}
+function stockDraftTotal() {
+  return state.stockDraft.items.reduce((s, i) => s + (Number(i.cost_price) || 0) * (Number(i.qty) || 0), 0);
+}
+
+async function openStockReceipt(id) {
+  try {
+    state.stockReceiptToShow = await api('/stock/receipts/' + id);
+    render();
+  } catch (err) { showToast(err.message); }
+}
+function closeStockReceiptModal() { state.stockReceiptToShow = null; render(); }
+async function cancelStockReceipt(id) {
+  if (!confirm('Отменить приход №' + id + '? Остатки товаров уменьшатся на количество из этого прихода.')) return;
+  try {
+    await api('/stock/receipts/' + id, { method: 'DELETE' });
+    state.stockReceiptToShow = null;
+    const [products] = await Promise.all([api('/products'), loadStockData()]);
+    state.products = products;
+    render();
+    showToast('Приход №' + id + ' отменён');
+  } catch (err) { showToast(err.message); }
+}
+
+/* ---- Поставщики ---- */
+function openSupplierModal(id) {
+  state.supplierEditId = id || null;
+  state.supplierFormError = '';
+  state.showSupplierModal = true;
+  render();
+  const el = document.getElementById('sup-name');
+  if (el) el.focus();
+}
+function closeSupplierModal() { state.showSupplierModal = false; state.supplierEditId = null; render(); }
+async function saveSupplier() {
+  const val = id => (document.getElementById(id)?.value || '').trim();
+  const body = { name: val('sup-name'), phone: val('sup-phone'), bin: val('sup-bin'), contact_person: val('sup-contact'), note: val('sup-note') };
+  if (!body.name) { state.supplierFormError = 'Укажите название поставщика'; render(); return; }
+  if (body.bin && !/^\d{12}$/.test(body.bin)) { state.supplierFormError = 'БИН/ИИН — 12 цифр'; render(); return; }
+  try {
+    if (state.supplierEditId) {
+      const updated = await api('/suppliers/' + state.supplierEditId, { method: 'PUT', body });
+      const idx = state.suppliers.findIndex(s => s.id === updated.id);
+      if (idx >= 0) state.suppliers[idx] = { ...state.suppliers[idx], ...updated };
+      state.stockReceipts.forEach(r => { if (r.supplier_id === updated.id) r.supplier_name = updated.name; });
+      showToast('Поставщик сохранён');
+    } else {
+      const created = await api('/suppliers', { method: 'POST', body });
+      state.suppliers.push(created);
+      state.suppliers.sort((a, b) => a.name.localeCompare(b.name, 'ru'));
+      // Если добавляли из формы прихода — сразу выбираем его
+      if (state.stockTab === 'new') { state.stockDraft.supplierId = String(created.id); saveStockDraft(); }
+      showToast('Поставщик добавлен');
+    }
+    state.showSupplierModal = false;
+    state.supplierEditId = null;
+    render();
+  } catch (err) { state.supplierFormError = err.message; render(); }
+}
+async function deleteSupplier(id) {
+  const s = state.suppliers.find(s => s.id === id);
+  if (!s || !confirm('Удалить поставщика «' + s.name + '»? Проведённые приходы останутся, в них сохранится название.')) return;
+  try {
+    await api('/suppliers/' + id, { method: 'DELETE' });
+    state.suppliers = state.suppliers.filter(x => x.id !== id);
+    if (String(state.stockDraft.supplierId) === String(id)) { state.stockDraft.supplierId = ''; saveStockDraft(); }
+    render();
+  } catch (err) { showToast(err.message); }
+}
+
+/* ============ RENDER: СКЛАД ============ */
+function renderStock() {
+  const tabs = [
+    { id: 'new', label: 'Приход' + (state.stockDraft.items.length ? ' (' + state.stockDraft.items.length + ')' : '') },
+    { id: 'history', label: 'История' },
+    { id: 'suppliers', label: 'Поставщики' },
+  ];
+  let body = '';
+  if (state.stockTab === 'history') body = renderStockHistory();
+  else if (state.stockTab === 'suppliers') body = renderSuppliers();
+  else body = renderStockNew();
+  return `
+  <div class="page-head">
+    <div><h2>Склад</h2><div class="page-sub">Приём товара от поставщиков и остатки</div></div>
+  </div>
+  <div class="stock-tabs">
+    ${tabs.map(t => `<button class="stock-tab ${state.stockTab === t.id ? 'active' : ''}" onclick="setStockTab('${t.id}')">${esc(t.label)}</button>`).join('')}
+  </div>
+  ${body}
+  ${state.showSupplierModal ? renderSupplierModal() : ''}
+  ${state.showAddProductModal ? renderAddProductModalAnywhere() : ''}`;
+}
+
+function renderStockNew() {
+  const isAdmin = state.currentUser.role === 'admin';
+  const d = state.stockDraft;
+  const supplierOptions = state.suppliers.map(s => `<option value="${s.id}" ${String(d.supplierId) === String(s.id) ? 'selected' : ''}>${esc(s.name)}</option>`).join('');
+  const matches = stockSearchMatches();
+
+  const itemsHtml = d.items.map((i, idx) => {
+    const p = state.products.find(p => p.id === i.productId);
+    if (!p) return '';
+    const isDraft = p.unit === 'л';
+    const sum = (Number(i.cost_price) || 0) * (Number(i.qty) || 0);
+    const step = isDraft ? 1 : 1;
+    return `
+    <div class="sr-item">
+      <div class="sr-num">${idx + 1}</div>
+      <div class="sr-name">
+        <div class="sr-title">${esc(p.name)}</div>
+        <div class="sr-sub"><span class="mono">${esc(p.barcode || 'без штрихкода')}</span> · на складе ${formatQty(p.stock, p.unit)}</div>
+      </div>
+      <div class="sr-field sr-qty">
+        <label>Кол-во${isDraft ? ', л' : ''}</label>
+        <div class="sr-qty-ctrl">
+          <button class="kassa-qty-btn" onclick="changeStockDraftQty(${p.id}, -${step})" aria-label="Меньше">−</button>
+          <input type="number" inputmode="decimal" min="0" step="${isDraft ? '0.1' : '1'}" value="${i.qty}" onchange="updateStockDraftItem(${p.id}, 'qty', this.value)">
+          <button class="kassa-qty-btn" onclick="changeStockDraftQty(${p.id}, ${step})" aria-label="Больше">+</button>
+        </div>
+      </div>
+      ${isAdmin ? `
+      <div class="sr-field">
+        <label>Закуп, ₸/${isDraft ? 'л' : 'шт'}</label>
+        <input type="number" inputmode="decimal" min="0" step="0.01" value="${i.cost_price}" placeholder="${Number(p.cost_price) || 0}" onchange="updateStockDraftItem(${p.id}, 'cost_price', this.value)">
+      </div>
+      <div class="sr-field">
+        <label>Цена продажи, ₸</label>
+        <input type="number" inputmode="decimal" min="0" step="0.01" value="${i.price}" placeholder="${Number(p.price)}" onchange="updateStockDraftItem(${p.id}, 'price', this.value)">
+      </div>
+      <div class="sr-sum"><label>Сумма</label><div class="mono">${fmt(sum)}</div></div>` : ''}
+      <button class="kassa-row-remove sr-remove" onclick="removeStockDraftItem(${p.id})" aria-label="Убрать из прихода">×</button>
+    </div>`;
+  }).join('');
+
+  return `
+  <div class="panel stock-head-panel">
+    <div class="stock-head-grid">
+      <div class="field">
+        <label>Поставщик</label>
+        <div style="display:flex; gap:6px;">
+          <select id="stock-supplier" style="flex:1;" onchange="setStockDraftField('supplierId', this.value)">
+            <option value="">— не выбран —</option>
+            ${supplierOptions}
+          </select>
+          <button type="button" class="icon-btn" title="Новый поставщик" onclick="openSupplierModal()">+</button>
+        </div>
+      </div>
+      <div class="field">
+        <label>№ накладной</label>
+        <input type="text" value="${esc(d.docNumber)}" placeholder="например, 000123" onchange="setStockDraftField('docNumber', this.value)">
+      </div>
+      <div class="field">
+        <label>Примечание</label>
+        <input type="text" value="${esc(d.note)}" placeholder="необязательно" onchange="setStockDraftField('note', this.value)">
+      </div>
+    </div>
+  </div>
+
+  <div class="stock-scan-row">
+    <button class="stock-camera-btn" onclick="openStockCamera()">${CAMERA_ICON}<span>Сканировать</span></button>
+    <div class="stock-search-wrap">
+      <input id="stock-search-input" class="kassa-search-input" type="text" autocomplete="off"
+        placeholder="Штрихкод (USB-сканер) или название товара"
+        value="${esc(state.stockSearch)}"
+        oninput="handleStockSearchInput(this.value)"
+        onkeydown="handleStockSearchKey(event, this.value)">
+      ${matches.length ? `
+      <div class="stock-search-results">
+        ${matches.map(p => `<button onclick="pickStockSearchResult(${p.id})"><span>${esc(p.name)}</span><span class="mono">${esc(p.barcode || '')}</span></button>`).join('')}
+      </div>` : (state.stockSearch.trim() && !/^\d{6,}$/.test(state.stockSearch.trim()) ? `
+      <div class="stock-search-results"><div class="stock-search-empty">Не найдено. <button class="linklike" onclick="openAddProductModal('stock', '')">Создать новый товар</button></div></div>` : '')}
+    </div>
+  </div>
+
+  <div class="panel stock-items-panel">
+    ${d.items.length ? itemsHtml : `<div class="empty-state">Приход пуст. Нажмите «Сканировать» и наведите камеру на штрихкод или QR-код товара.<br>Если товара нет в базе — откроется карточка нового товара.</div>`}
+  </div>
+
+  <div class="stock-footer">
+    <div class="kassa-total-box">
+      <span class="kassa-total-label">${d.items.length} поз.${isAdmin ? ' · сумма закупа' : ''}</span>
+      ${isAdmin ? `<span class="kassa-total-value">${fmt(stockDraftTotal())}</span>` : ''}
+    </div>
+    <div class="kassa-footer-actions">
+      <button class="kassa-btn-clear" ${d.items.length === 0 ? 'disabled' : ''} onclick="clearStockDraft()">Очистить</button>
+      <button class="kassa-btn-pay" ${d.items.length === 0 ? 'disabled' : ''} onclick="postStockReceipt()">Провести приход</button>
+    </div>
+  </div>`;
+}
+
+function renderStockHistory() {
+  const isAdmin = state.currentUser.role === 'admin';
+  const list = state.stockReceipts;
+  const rows = list.map(r => `
+    <tr>
+      <td class="num">№${r.id}</td>
+      <td>${fmtDate(r.created_at)}</td>
+      <td>${esc(r.supplier_name || '—')}</td>
+      <td class="mono">${esc(r.doc_number || '—')}</td>
+      <td class="num">${r.items_count}</td>
+      ${isAdmin ? `<td class="num">${fmt(r.total)}</td>` : ''}
+      <td>${esc(r.user_name)}</td>
+      <td class="row-actions"><button class="btn btn-ghost btn-sm" onclick="openStockReceipt(${r.id})">Открыть</button></td>
+    </tr>`).join('');
+  return `
+  <div class="panel">
+    <table>
+      <thead><tr><th>Приход</th><th>Дата</th><th>Поставщик</th><th>Накладная</th><th>Поз.</th>${isAdmin ? '<th>Сумма</th>' : ''}<th>Принял</th><th></th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+    ${list.length === 0 ? '<div class="empty-state">Приходов пока нет.</div>' : ''}
+  </div>`;
+}
+
+function renderSuppliers() {
+  const isAdmin = state.currentUser.role === 'admin';
+  const cards = state.suppliers.map(s => `
+    <div class="supplier-card">
+      <div class="supplier-top">
+        <div>
+          <div class="supplier-name">${esc(s.name)}</div>
+          ${s.contact_person ? `<div class="page-sub" style="margin-top:2px;">${esc(s.contact_person)}</div>` : ''}
+        </div>
+        ${isAdmin ? `<div class="row-actions">
+          <button class="btn btn-ghost btn-sm" onclick="openSupplierModal(${s.id})">Изменить</button>
+          <button class="btn btn-danger btn-sm" onclick="deleteSupplier(${s.id})">Удалить</button>
+        </div>` : ''}
+      </div>
+      <div class="pvc-row"><span>Телефон</span><span>${s.phone ? `<a href="tel:${esc(s.phone.replace(/[^\d+]/g, ''))}">${esc(s.phone)}</a>` : '—'}</span></div>
+      <div class="pvc-row"><span>БИН/ИИН</span><span class="mono">${esc(s.bin || '—')}</span></div>
+      <div class="pvc-row"><span>Приходов</span><span>${s.receipts_count || 0}${s.last_at ? ' · последний ' + new Date(s.last_at).toLocaleDateString('ru-RU') : ''}</span></div>
+      ${isAdmin && s.receipts_total !== undefined ? `<div class="pvc-row"><span>Закуплено на</span><span class="num">${fmt(s.receipts_total)}</span></div>` : ''}
+      ${s.note ? `<div class="pvc-row"><span>Примечание</span><span>${esc(s.note)}</span></div>` : ''}
+    </div>`).join('');
+  return `
+  <div class="table-toolbar">
+    <div class="page-sub">${state.suppliers.length} поставщик(ов)</div>
+    <button class="btn btn-hop btn-sm" onclick="openSupplierModal()">+ Новый поставщик</button>
+  </div>
+  <div class="supplier-grid">${cards}</div>
+  ${state.suppliers.length === 0 ? '<div class="panel"><div class="empty-state">Поставщиков пока нет — добавьте первого.</div></div>' : ''}`;
+}
+
+function renderSupplierModal() {
+  const s = state.supplierEditId ? state.suppliers.find(x => x.id === state.supplierEditId) || {} : {};
+  return `
+  <div class="modal-overlay" onclick="if(event.target===this) closeSupplierModal()">
+    <div class="modal-card add-product-modal">
+      <div class="modal-close-row"><button class="icon-btn" onclick="closeSupplierModal()" aria-label="Закрыть">×</button></div>
+      <div class="add-product-body">
+        <h3 class="add-product-title">${state.supplierEditId ? 'Поставщик' : 'Новый поставщик'}</h3>
+        ${state.supplierFormError ? `<div class="login-error">${esc(state.supplierFormError)}</div>` : ''}
+        <div class="field"><label>Название *</label><input id="sup-name" type="text" value="${esc(s.name || '')}" placeholder="ТОО «Пивной дом»"></div>
+        <div class="field"><label>Телефон</label><input id="sup-phone" type="tel" value="${esc(s.phone || '')}" placeholder="+7 700 000 00 00"></div>
+        <div class="field"><label>БИН / ИИН</label><input id="sup-bin" type="text" inputmode="numeric" maxlength="12" value="${esc(s.bin || '')}" placeholder="12 цифр"></div>
+        <div class="field"><label>Контактное лицо</label><input id="sup-contact" type="text" value="${esc(s.contact_person || '')}" placeholder="Имя торгового представителя"></div>
+        <div class="field"><label>Примечание</label><input id="sup-note" type="text" value="${esc(s.note || '')}" placeholder="Дни поставки, условия оплаты…"></div>
+      </div>
+      <div class="receipt-actions" style="padding-top:12px;">
+        <button class="btn btn-ghost" style="flex:1;" onclick="closeSupplierModal()">Отмена</button>
+        <button class="btn btn-hop" style="flex:1;" onclick="saveSupplier()">Сохранить</button>
+      </div>
+    </div>
+  </div>`;
+}
+
+function renderStockReceiptModal() {
+  const r = state.stockReceiptToShow;
+  if (!r) return '';
+  const isAdmin = state.currentUser.role === 'admin';
+  const lines = (r.items || []).map(i => `
+    <div class="receipt-line">
+      <span>${esc(i.product_name)}</span>
+      <span class="qp">${formatQty(i.qty, i.unit)}${isAdmin ? ' × ' + fmt(i.cost_price) : ''}</span>
+    </div>`).join('');
+  return `
+  <div class="modal-overlay" onclick="if(event.target===this) closeStockReceiptModal()">
+    <div class="modal-card">
+      <div class="modal-close-row"><button class="icon-btn" onclick="closeStockReceiptModal()" aria-label="Закрыть">×</button></div>
+      <div class="receipt">
+        <div class="receipt-head">
+          <div class="shop">Приход №${r.id}</div>
+          <div class="meta">${fmtDate(r.created_at)}<br>
+            Поставщик: ${esc(r.supplier_name || '—')}${r.doc_number ? '<br>Накладная: ' + esc(r.doc_number) : ''}<br>
+            Принял: ${esc(r.user_name)}</div>
+        </div>
+        ${lines}
+        ${isAdmin ? `<div class="receipt-total"><span>Сумма закупа</span><span>${fmt(r.total)}</span></div>` : ''}
+        ${r.note ? `<div class="receipt-foot">${esc(r.note)}</div>` : ''}
+      </div>
+      <div class="receipt-actions">
+        ${isAdmin ? `<button class="btn btn-danger" style="flex:1;" onclick="cancelStockReceipt(${r.id})">Отменить приход</button>` : ''}
+        <button class="btn btn-ghost" style="flex:1;" onclick="window.print()">Печать</button>
+        <button class="btn btn-primary" style="flex:1;" onclick="closeStockReceiptModal()">Готово</button>
+      </div>
+    </div>
+  </div>`;
+}
+
 /* ============ MASTER RENDER ============ */
 function render() {
   const app = document.getElementById('app');
@@ -1270,6 +2024,7 @@ function render() {
   if (state.view === 'pos') viewHtml = renderPOS();
   else if (state.view === 'products') viewHtml = renderProducts();
   else if (state.view === 'history') viewHtml = renderHistory();
+  else if (state.view === 'stock') viewHtml = renderStock();
   else if (state.view === 'trash' && state.currentUser.role === 'admin') viewHtml = renderTrash();
   else if (state.view === 'analytics' && state.currentUser.role === 'admin') viewHtml = renderAnalytics();
   else if (state.view === 'users' && state.currentUser.role === 'admin') viewHtml = renderUsers();
@@ -1281,6 +2036,7 @@ function render() {
       <main class="content ${state.view === 'pos' ? 'content-wide' : ''}">${viewHtml}</main>
     </div>
     ${renderReceiptModal()}
+    ${renderStockReceiptModal()}
     ${state.toast ? `<div class="toast">${esc(state.toast)}</div>` : ''}
   `;
   if (state.view === 'pos' && !state.receiptToShow && !state.showPaymentModal) focusScanInput();

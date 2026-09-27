@@ -77,14 +77,15 @@ router.put('/:id', requireAdmin, async (req, res) => {
          name = COALESCE($1, name),
          price = COALESCE($2, price),
          stock = COALESCE($3, stock),
-         barcode = $4,
+         barcode = CASE WHEN $11::boolean THEN $4 ELSE barcode END,
          image_url = COALESCE($5, image_url),
          category = COALESCE($6, category),
          cost_price = COALESCE($7, cost_price),
          unit = COALESCE($8, unit),
          volume_liters = COALESCE($9, volume_liters)
        WHERE id = $10 RETURNING *`,
-      [name, price, stock, barcode || null, image_url === undefined ? null : image_url, category || null, cost_price, productUnit, volume_liters, req.params.id]
+      // Штрихкод меняем только если он передан в запросе — иначе правка цены/остатка стирала бы его
+      [name, price, stock, barcode ? String(barcode).trim() : null, image_url === undefined ? null : image_url, category || null, cost_price, productUnit, volume_liters, req.params.id, barcode !== undefined]
     );
     if (!rows[0]) return res.status(404).json({ error: 'Товар не найден' });
     res.json(rows[0]);
