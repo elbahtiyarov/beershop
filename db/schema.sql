@@ -142,6 +142,59 @@ ALTER TABLE stock_receipt_items ADD COLUMN IF NOT EXISTS subtotal NUMERIC(12,2) 
 ALTER TABLE stock_receipt_items ALTER COLUMN qty TYPE NUMERIC(10,2) USING qty::numeric;
 CREATE INDEX IF NOT EXISTS idx_stock_receipt_items_receipt ON stock_receipt_items(stock_receipt_id);
 
+-- Возвраты поставщику (истёк срок, потерял вид, брак). Забирает представитель поставщика по доверенности.
+CREATE TABLE IF NOT EXISTS supplier_returns (
+  id SERIAL PRIMARY KEY,
+  supplier_id INTEGER REFERENCES suppliers(id) ON DELETE SET NULL,
+  supplier_name VARCHAR(200),
+  poa_number VARCHAR(100),
+  poa_date DATE,
+  representative_name VARCHAR(150),
+  representative_iin VARCHAR(20),
+  note TEXT,
+  total NUMERIC(12,2) NOT NULL DEFAULT 0,
+  user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  user_name VARCHAR(100),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+-- Таблица могла остаться от старой версии — добавляем недостающие колонки
+ALTER TABLE supplier_returns ADD COLUMN IF NOT EXISTS supplier_id INTEGER REFERENCES suppliers(id) ON DELETE SET NULL;
+ALTER TABLE supplier_returns ADD COLUMN IF NOT EXISTS supplier_name VARCHAR(200);
+ALTER TABLE supplier_returns ADD COLUMN IF NOT EXISTS poa_number VARCHAR(100);
+ALTER TABLE supplier_returns ADD COLUMN IF NOT EXISTS poa_date DATE;
+ALTER TABLE supplier_returns ADD COLUMN IF NOT EXISTS representative_name VARCHAR(150);
+ALTER TABLE supplier_returns ADD COLUMN IF NOT EXISTS representative_iin VARCHAR(20);
+ALTER TABLE supplier_returns ADD COLUMN IF NOT EXISTS note TEXT;
+ALTER TABLE supplier_returns ADD COLUMN IF NOT EXISTS total NUMERIC(12,2) NOT NULL DEFAULT 0;
+ALTER TABLE supplier_returns ADD COLUMN IF NOT EXISTS user_id INTEGER REFERENCES users(id) ON DELETE SET NULL;
+ALTER TABLE supplier_returns ADD COLUMN IF NOT EXISTS user_name VARCHAR(100);
+ALTER TABLE supplier_returns ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT now();
+CREATE INDEX IF NOT EXISTS idx_supplier_returns_created_at ON supplier_returns(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_supplier_returns_supplier ON supplier_returns(supplier_id);
+
+CREATE TABLE IF NOT EXISTS supplier_return_items (
+  id SERIAL PRIMARY KEY,
+  supplier_return_id INTEGER REFERENCES supplier_returns(id) ON DELETE CASCADE,
+  product_id INTEGER REFERENCES products(id) ON DELETE SET NULL,
+  product_name VARCHAR(200),
+  barcode VARCHAR(64),
+  unit VARCHAR(10) NOT NULL DEFAULT 'шт',
+  qty NUMERIC(10,2),
+  cost_price NUMERIC(10,2) NOT NULL DEFAULT 0,
+  subtotal NUMERIC(12,2) NOT NULL DEFAULT 0,
+  reason VARCHAR(30) NOT NULL DEFAULT 'expired'
+);
+ALTER TABLE supplier_return_items ADD COLUMN IF NOT EXISTS supplier_return_id INTEGER REFERENCES supplier_returns(id) ON DELETE CASCADE;
+ALTER TABLE supplier_return_items ADD COLUMN IF NOT EXISTS product_id INTEGER REFERENCES products(id) ON DELETE SET NULL;
+ALTER TABLE supplier_return_items ADD COLUMN IF NOT EXISTS product_name VARCHAR(200);
+ALTER TABLE supplier_return_items ADD COLUMN IF NOT EXISTS barcode VARCHAR(64);
+ALTER TABLE supplier_return_items ADD COLUMN IF NOT EXISTS unit VARCHAR(10) NOT NULL DEFAULT 'шт';
+ALTER TABLE supplier_return_items ADD COLUMN IF NOT EXISTS qty NUMERIC(10,2);
+ALTER TABLE supplier_return_items ADD COLUMN IF NOT EXISTS cost_price NUMERIC(10,2) NOT NULL DEFAULT 0;
+ALTER TABLE supplier_return_items ADD COLUMN IF NOT EXISTS subtotal NUMERIC(12,2) NOT NULL DEFAULT 0;
+ALTER TABLE supplier_return_items ADD COLUMN IF NOT EXISTS reason VARCHAR(30) NOT NULL DEFAULT 'expired';
+CREATE INDEX IF NOT EXISTS idx_supplier_return_items_return ON supplier_return_items(supplier_return_id);
+
 -- Старые версии таблиц склада могли содержать свои обязательные колонки,
 -- которые новый код не заполняет, — снимаем с них NOT NULL, чтобы приход проводился.
 DO $$
@@ -155,7 +208,7 @@ BEGIN
          ('suppliers','id'), ('stock_receipts','id'), ('stock_receipt_items','id'),
          ('suppliers','name'), ('stock_receipts','user_name'),
          ('stock_receipt_items','stock_receipt_id'), ('stock_receipt_items','product_name'), ('stock_receipt_items','qty'))
-       AND table_name IN ('suppliers', 'stock_receipts', 'stock_receipt_items')
+       AND table_name IN ('suppliers', 'stock_receipts', 'stock_receipt_items', 'supplier_returns', 'supplier_return_items')
   LOOP
     EXECUTE format('ALTER TABLE %I ALTER COLUMN %I DROP NOT NULL', r.table_name, r.column_name);
   END LOOP;

@@ -29,6 +29,16 @@ router.get('/', async (req, res) => {
   res.json(rows);
 });
 
+// Товары, которые привозил этот поставщик (для быстрого выбора при возврате)
+router.get('/:id/products', async (req, res) => {
+  const { rows } = await pool.query(
+    `SELECT i.product_id, MAX(r.created_at) AS last_at, SUM(i.qty) AS total_qty
+       FROM stock_receipt_items i JOIN stock_receipts r ON r.id = i.stock_receipt_id
+      WHERE r.supplier_id = $1 AND i.product_id IS NOT NULL
+      GROUP BY i.product_id ORDER BY MAX(r.created_at) DESC LIMIT 60`, [req.params.id]);
+  res.json(rows.map(r => r.product_id));
+});
+
 // Добавить поставщика — кассир тоже может (принимает товар от нового поставщика)
 router.post('/', async (req, res) => {
   const b = req.body || {};

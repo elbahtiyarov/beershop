@@ -48,6 +48,12 @@ let state = {
   suppliers: [],
   stockReceipts: [],
   stockReceiptToShow: null,
+  returnDraft: loadReturnDraft(),
+  returnSearch: '',
+  stockReturns: [],
+  stockReturnToShow: null,
+  supplierProducts: {}, // id поставщика → товары, которые он привозил
+  stockHistoryFilter: 'all', // all | in | out
   showSupplierModal: false,
   supplierEditId: null,
   supplierFormError: '',
@@ -1945,14 +1951,19 @@ function saveStockDraft() {
 
 async function loadStockData() {
   try {
-    const [suppliers, receipts] = await Promise.all([api('/suppliers'), api('/stock/receipts')]);
+    const [suppliers, receipts, returns] = await Promise.all([api('/suppliers'), api('/stock/receipts'), api('/stock/returns')]);
     state.suppliers = suppliers;
     state.stockReceipts = receipts;
+    state.stockReturns = returns;
+    if (state.returnDraft.supplierId) await loadSupplierProducts(state.returnDraft.supplierId);
   } catch (err) { if (err.message !== 'unauthorized') showToast(err.message); }
   // Позиции черновика, чьи товары удалили, убираем
   const before = state.stockDraft.items.length;
   state.stockDraft.items = state.stockDraft.items.filter(i => state.products.some(p => p.id === i.productId));
   if (state.stockDraft.items.length !== before) saveStockDraft();
+  const beforeRet = state.returnDraft.items.length;
+  state.returnDraft.items = state.returnDraft.items.filter(i => state.products.some(p => p.id === i.productId));
+  if (state.returnDraft.items.length !== beforeRet) saveReturnDraft();
 }
 function setStockTab(tab) {
   state.stockTab = tab;
@@ -2173,6 +2184,7 @@ async function saveSupplier() {
       state.suppliers.sort((a, b) => a.name.localeCompare(b.name, 'ru'));
       // Если добавляли из формы прихода — сразу выбираем его
       if (state.stockTab === 'new') { state.stockDraft.supplierId = String(created.id); saveStockDraft(); }
+      if (state.stockTab === 'return') { state.returnDraft.supplierId = String(created.id); saveReturnDraft(); }
       showToast('Поставщик добавлен');
     }
     state.showSupplierModal = false;
@@ -2195,16 +2207,18 @@ async function deleteSupplier(id) {
 function renderStock() {
   const tabs = [
     { id: 'new', label: 'Приход' + (state.stockDraft.items.length ? ' (' + state.stockDraft.items.length + ')' : '') },
+    { id: 'return', label: 'Возврат' + (state.returnDraft.items.length ? ' (' + state.returnDraft.items.length + ')' : '') },
     { id: 'history', label: 'История' },
     { id: 'suppliers', label: 'Поставщики' },
   ];
   let body = '';
   if (state.stockTab === 'history') body = renderStockHistory();
+  else if (state.stockTab === 'return') body = renderStockReturn();
   else if (state.stockTab === 'suppliers') body = renderSuppliers();
   else body = renderStockNew();
   return `
   <div class="page-head">
-    <div><h2>Склад</h2><div class="page-sub">Приём товара от поставщиков и остатки</div></div>
+    <div><h2>Склад</h2><div class="page-sub">Приём товара от поставщиков, возвраты и остатки</div></div>
   </div>
   <div class="stock-tabs">
     ${tabs.map(t => `<button class="stock-tab ${state.stockTab === t.id ? 'active' : ''}" onclick="setStockTab('${t.id}')">${esc(t.label)}</button>`).join('')}
@@ -2311,27 +2325,419 @@ function renderStockNew() {
   </div>`;
 }
 
+function setStockHistoryFilter(f) { state.stockHistoryFilter = f; render(); }
 function renderStockHistory() {
   const isAdmin = state.currentUser.role === 'admin';
-  const list = state.stockReceipts;
-  const rows = list.map(r => `
+  const f = state.stockHistoryFilter;
+  const docs = [
+    ...(f === 'out' ? [] : state.stockReceipts.map(r => ({ ...r, kind: 'in' }))),
+    ...(f === 'in' ? [] : state.stockReturns.map(r => ({ ...r, kind: 'out' }))),
+  ].sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+  const chips = [['all', 'Все', state.stockReceipts.length + state.stockReturns.length], ['in', 'Приходы', state.stockReceipts.length], ['out', 'Возвраты', state.stockReturns.length]]
+    .map(([id, label, n]) => `<button class="pos2-chip ${f === id ? 'active' : ''}" onclick="setStockHistoryFilter('${id}')">${label}<span>${n}</span></button>`).join('');
+  const rows = docs.map(r => {
+    const isIn = r.kind === 'in';
+    const docLine = isIn ? (r.doc_number ? 'Накладная ' + esc(r.doc_number) : 'без накладной')
+      : 'Доверенность № ' + esc(r.poa_number || '—') + (r.representative_name ? ' · ' + esc(r.representative_name) : '');
+    return `
+    <button class="pl-row doc-row ${isIn ? 'doc-in' : 'doc-out'}" onclick="${isIn ? 'openStockReceipt' : 'openSupplierReturn'}(${r.id})">
+      <div class="doc-badge">${isIn ? '+' : '−'}</div>
+      <div class="pl-main">
+        <div class="pl-name">${isIn ? 'Приход' : 'Возврат поставщику'} №${r.id} · ${esc(r.supplier_name || 'без поставщика')}</div>
+        <div class="pl-sub"><span>${fmtDate(r.created_at)}</span><span>${docLine}</span></div>
+        <div class="pl-cost">${r.items_count} поз. · ${isIn ? 'принял' : 'оформил'} ${esc(r.user_name || '—')}</div>
+      </div>
+      <div class="pl-right">
+        ${isAdmin ? `<div class="pl-price ${isIn ? '' : 'neg'}">${isIn ? '' : '−'}${fmt(r.total)}</div>` : ''}
+        <span class="pl-stock ${isIn ? 'ok' : 'low'}">${isIn ? 'приход' : 'возврат'}</span>
+      </div>
+      <span class="pl-chev" aria-hidden="true">›</span>
+    </button>`;
+  }).join('');
+  return `
+  <div class="pos2-chips" style="margin-bottom:12px;">${chips}</div>
+  <div class="pl-list doc-list">${rows}</div>
+  ${docs.length === 0 ? '<div class="panel"><div class="empty-state">Документов пока нет.</div></div>' : ''}`;
+}
+
+/* ============ СКЛАД: ВОЗВРАТ ПОСТАВЩИКУ ============ */
+const RETURN_REASONS = [
+  { id: 'expired', label: 'Истёк срок годности' },
+  { id: 'appearance', label: 'Потерял товарный вид' },
+  { id: 'damaged', label: 'Брак / повреждение' },
+  { id: 'other', label: 'Другое' },
+];
+function reasonLabel(id) { return (RETURN_REASONS.find(r => r.id === id) || RETURN_REASONS[3]).label; }
+function todayISO() {
+  const d = new Date();
+  return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+}
+function fmtDay(iso) {
+  if (!iso) return '';
+  const s = String(iso).slice(0, 10).split('-');
+  return s.length === 3 ? `${s[2]}.${s[1]}.${s[0]}` : String(iso);
+}
+function emptyReturnDraft() {
+  return { supplierId: '', poaNumber: '', poaDate: todayISO(), repName: '', repIin: '', note: '', defaultReason: 'expired', items: [] };
+}
+function loadReturnDraft() {
+  try {
+    const d = JSON.parse(localStorage.getItem('beershop_return_draft') || 'null');
+    if (d && Array.isArray(d.items)) return { ...emptyReturnDraft(), ...d };
+  } catch (e) {}
+  return emptyReturnDraft();
+}
+function saveReturnDraft() {
+  try { localStorage.setItem('beershop_return_draft', JSON.stringify(state.returnDraft)); } catch (e) {}
+}
+
+async function setReturnDraftField(field, value, rerender) {
+  state.returnDraft[field] = value;
+  saveReturnDraft();
+  if (field === 'supplierId') await loadSupplierProducts(value);
+  if (rerender || field === 'supplierId') render();
+}
+async function loadSupplierProducts(supplierId) {
+  if (!supplierId || state.supplierProducts[supplierId]) return;
+  try { state.supplierProducts[supplierId] = await api('/suppliers/' + supplierId + '/products'); }
+  catch (e) { state.supplierProducts[supplierId] = []; }
+}
+
+function returnQtyInDraft(productId) {
+  const it = state.returnDraft.items.find(i => i.productId === productId);
+  return it ? Number(it.qty) || 0 : 0;
+}
+// Добавить товар в возврат (+1). Больше, чем лежит на складе, вернуть нельзя.
+function addToReturnDraft(productId, qty = 1) {
+  const p = state.products.find(x => x.id === productId);
+  if (!p) return { ok: false, message: 'Товар не найден' };
+  const have = Number(p.stock) || 0;
+  const cur = returnQtyInDraft(productId);
+  if (cur + qty > have + 1e-9) {
+    const msg = have <= 0 ? `«${p.name}» нет на складе` : `На складе только ${formatQty(have, p.unit)} «${p.name}»`;
+    showToast(msg);
+    return { ok: false, message: msg };
+  }
+  let item = state.returnDraft.items.find(i => i.productId === productId);
+  if (item) {
+    item.qty = +(cur + qty).toFixed(2);
+    state.returnDraft.items = [item, ...state.returnDraft.items.filter(i => i !== item)];
+  } else {
+    item = { productId, qty, reason: state.returnDraft.defaultReason || 'expired', cost_price: Number(p.cost_price) > 0 ? Number(p.cost_price) : '' };
+    state.returnDraft.items.unshift(item);
+  }
+  saveReturnDraft();
+  render();
+  return { ok: true, message: '✓ ' + p.name + ' — к возврату ' + formatQty(item.qty, p.unit) };
+}
+function updateReturnItem(productId, field, value) {
+  const item = state.returnDraft.items.find(i => i.productId === productId);
+  if (!item) return;
+  if (field === 'reason') item.reason = value;
+  else if (field === 'qty') {
+    const p = state.products.find(x => x.id === productId);
+    const n = Number(String(value).replace(',', '.'));
+    if (n > 0) item.qty = p ? Math.min(n, Number(p.stock) || 0) : n;
+    if (p && n > Number(p.stock)) showToast('На складе только ' + formatQty(p.stock, p.unit));
+  } else {
+    const n = Number(String(value).replace(',', '.'));
+    item[field] = value === '' || Number.isNaN(n) ? '' : n;
+  }
+  saveReturnDraft();
+  render();
+}
+function changeReturnQty(productId, delta) {
+  const item = state.returnDraft.items.find(i => i.productId === productId);
+  if (!item) return;
+  if (delta > 0) { addToReturnDraft(productId, delta); return; }
+  const next = +(Number(item.qty) + delta).toFixed(2);
+  if (next <= 0) { removeReturnItem(productId); return; }
+  item.qty = next;
+  saveReturnDraft();
+  render();
+}
+function removeReturnItem(productId) {
+  state.returnDraft.items = state.returnDraft.items.filter(i => i.productId !== productId);
+  saveReturnDraft();
+  render();
+}
+function setAllReturnReasons(reason) {
+  state.returnDraft.defaultReason = reason;
+  state.returnDraft.items.forEach(i => { i.reason = reason; });
+  saveReturnDraft();
+  render();
+}
+function clearReturnDraft() {
+  if ((state.returnDraft.items.length || state.returnDraft.repName) && !confirm('Очистить текущий возврат?')) return;
+  const keepSupplier = '';
+  state.returnDraft = { ...emptyReturnDraft(), supplierId: keepSupplier };
+  saveReturnDraft();
+  render();
+}
+function returnDraftTotal() {
+  return state.returnDraft.items.reduce((s, i) => s + (Number(i.cost_price) || 0) * (Number(i.qty) || 0), 0);
+}
+
+function handleReturnCode(rawCode, fromCamera) {
+  const code = String(rawCode || '').trim();
+  if (!code) return { ok: false };
+  const p = findProductByBarcode(code);
+  state.returnSearch = '';
+  if (!p) {
+    const msg = 'Штрихкод «' + code + '» не найден в товарах';
+    if (!fromCamera) { showToast(msg); render(); }
+    return { ok: false, message: 'Не найден: ' + code };
+  }
+  const r = addToReturnDraft(p.id, 1);
+  if (!fromCamera) focusReturnSearch();
+  return r;
+}
+function openReturnCamera() {
+  openCameraScanner({ title: 'Сканер — возврат поставщику', continuous: true, onCode: (code) => handleReturnCode(code, true) });
+}
+function returnSearchMatches() {
+  const q = state.returnSearch.trim().toLowerCase();
+  if (!q) return [];
+  return state.products.filter(p => p.name.toLowerCase().includes(q) || (p.barcode && p.barcode.includes(q))).slice(0, 8);
+}
+function handleReturnSearchInput(value) { state.returnSearch = value; render(); focusReturnSearch(); }
+function handleReturnSearchKey(event, value) {
+  if (event.key !== 'Enter') return;
+  event.preventDefault();
+  const v = value.trim();
+  if (!v) return;
+  if (/^\S{6,}$/.test(v) && (findProductByBarcode(v) || /^\d+$/.test(v))) { handleReturnCode(v, false); return; }
+  const m = returnSearchMatches();
+  if (m.length === 1) pickReturnSearchResult(m[0].id);
+}
+function pickReturnSearchResult(id) { state.returnSearch = ''; addToReturnDraft(id, 1); focusReturnSearch(); }
+function focusReturnSearch() {
+  const el = document.getElementById('return-search-input');
+  if (el) { el.focus(); const l = el.value.length; try { el.setSelectionRange(l, l); } catch (e) {} }
+}
+
+async function postSupplierReturn() {
+  const d = state.returnDraft;
+  const isAdmin = state.currentUser.role === 'admin';
+  if (!d.supplierId) { showToast('Выберите поставщика'); return; }
+  if (!d.poaNumber.trim()) { showToast('Укажите номер доверенности'); document.getElementById('ret-poa')?.focus(); return; }
+  if (!d.repName.trim()) { showToast('Укажите ФИО представителя поставщика'); document.getElementById('ret-rep')?.focus(); return; }
+  if (d.repIin && d.repIin.replace(/\D/g, '').length !== 12) { showToast('ИИН представителя — 12 цифр'); return; }
+  if (!d.items.length) { showToast('Добавьте товары в возврат'); return; }
+  const sup = state.suppliers.find(s => String(s.id) === String(d.supplierId));
+  if (!confirm(`Провести возврат поставщику «${sup ? sup.name : ''}»: ${d.items.length} поз.${isAdmin ? ' на сумму ' + fmt(returnDraftTotal()) : ''}? Товар спишется со склада.`)) return;
+  try {
+    const result = await api('/stock/returns', {
+      method: 'POST',
+      body: {
+        supplier_id: Number(d.supplierId),
+        poa_number: d.poaNumber, poa_date: d.poaDate, representative_name: d.repName,
+        representative_iin: d.repIin, note: d.note,
+        items: d.items.map(i => ({ productId: i.productId, qty: Number(i.qty), reason: i.reason, cost_price: i.cost_price === '' ? null : Number(i.cost_price) })),
+      },
+    });
+    (result.products || []).forEach(up => {
+      const idx = state.products.findIndex(p => p.id === up.id);
+      if (idx >= 0) state.products[idx] = up;
+    });
+    delete result.products;
+    state.stockReturns.unshift(result);
+    state.returnDraft = emptyReturnDraft();
+    saveReturnDraft();
+    state.stockReturnToShow = result;
+    render();
+    showToast('Возврат №' + result.id + ' проведён — товар списан со склада');
+  } catch (err) { showToast(err.message); }
+}
+
+async function openSupplierReturn(id) {
+  try { state.stockReturnToShow = await api('/stock/returns/' + id); render(); } catch (err) { showToast(err.message); }
+}
+function closeSupplierReturnModal() { state.stockReturnToShow = null; render(); }
+async function cancelSupplierReturn(id) {
+  if (!confirm('Отменить возврат №' + id + '? Товар вернётся на склад.')) return;
+  try {
+    await api('/stock/returns/' + id, { method: 'DELETE' });
+    state.stockReturnToShow = null;
+    const [products] = await Promise.all([api('/products'), loadStockData()]);
+    state.products = products;
+    render();
+    showToast('Возврат №' + id + ' отменён, товар снова на складе');
+  } catch (err) { showToast(err.message); }
+}
+
+function renderStockReturn() {
+  const isAdmin = state.currentUser.role === 'admin';
+  const d = state.returnDraft;
+  const supplierOptions = state.suppliers.map(s => `<option value="${s.id}" ${String(d.supplierId) === String(s.id) ? 'selected' : ''}>${esc(s.name)}</option>`).join('');
+  const matches = returnSearchMatches();
+  const supIds = d.supplierId ? (state.supplierProducts[d.supplierId] || []) : [];
+  const supProducts = supIds.map(id => state.products.find(p => p.id === id)).filter(p => p && Number(p.stock) > 0);
+  const reasonOptions = (sel) => RETURN_REASONS.map(r => `<option value="${r.id}" ${sel === r.id ? 'selected' : ''}>${r.label}</option>`).join('');
+
+  const itemsHtml = d.items.map((i, idx) => {
+    const p = state.products.find(x => x.id === i.productId);
+    if (!p) return '';
+    const isDraft = p.unit === 'л';
+    const sum = (Number(i.cost_price) || 0) * (Number(i.qty) || 0);
+    return `
+    <div class="sr-item ret-item">
+      <div class="sr-num">${idx + 1}</div>
+      <div class="sr-name">
+        <div class="sr-title">${esc(p.name)}</div>
+        <div class="sr-sub"><span class="mono">${esc(p.barcode || 'без штрихкода')}</span> · на складе ${formatQty(p.stock, p.unit)}</div>
+      </div>
+      <div class="sr-field sr-qty">
+        <label>Кол-во${isDraft ? ', л' : ''}</label>
+        <div class="sr-qty-ctrl">
+          <button class="kassa-qty-btn" onclick="changeReturnQty(${p.id}, -1)" aria-label="Меньше">−</button>
+          <input type="number" inputmode="decimal" min="0" step="${isDraft ? '0.1' : '1'}" value="${i.qty}" onchange="updateReturnItem(${p.id}, 'qty', this.value)">
+          <button class="kassa-qty-btn" onclick="changeReturnQty(${p.id}, 1)" aria-label="Больше">+</button>
+        </div>
+      </div>
+      <div class="sr-field ret-reason">
+        <label>Причина</label>
+        <select onchange="updateReturnItem(${p.id}, 'reason', this.value)">${reasonOptions(i.reason)}</select>
+      </div>
+      ${isAdmin ? `
+      <div class="sr-field">
+        <label>Цена, ₸/${isDraft ? 'л' : 'шт'}</label>
+        <input type="number" inputmode="decimal" min="0" step="0.01" value="${i.cost_price}" placeholder="${Number(p.cost_price) || 0}" onchange="updateReturnItem(${p.id}, 'cost_price', this.value)">
+      </div>
+      <div class="sr-sum"><label>Сумма</label><div class="mono">${fmt(sum)}</div></div>` : ''}
+      <button class="kassa-row-remove sr-remove" onclick="removeReturnItem(${p.id})" aria-label="Убрать из возврата">×</button>
+    </div>`;
+  }).join('');
+
+  return `
+  <div class="ret-banner">${icon('mixed', 20)}<span>Возврат товара поставщику: просроченный, потерявший вид или бракованный товар забирает представитель поставщика по доверенности. Товар спишется со склада, будет сформирован акт для подписи.</span></div>
+
+  <div class="panel stock-head-panel">
+    <div class="ret-section-title">Поставщик и доверенность</div>
+    <div class="ret-head-grid">
+      <div class="field ret-span2">
+        <label>Поставщик *</label>
+        <div style="display:flex; gap:6px;">
+          <select style="flex:1;" onchange="setReturnDraftField('supplierId', this.value)">
+            <option value="">— выберите —</option>
+            ${supplierOptions}
+          </select>
+          <button type="button" class="icon-btn" title="Новый поставщик" onclick="openSupplierModal()">+</button>
+        </div>
+      </div>
+      <div class="field">
+        <label>№ доверенности *</label>
+        <input id="ret-poa" type="text" value="${esc(d.poaNumber)}" placeholder="например, 125" onchange="setReturnDraftField('poaNumber', this.value)">
+      </div>
+      <div class="field">
+        <label>Дата доверенности</label>
+        <input type="date" value="${esc(d.poaDate)}" onchange="setReturnDraftField('poaDate', this.value)">
+      </div>
+      <div class="field ret-span2">
+        <label>ФИО представителя *</label>
+        <input id="ret-rep" type="text" value="${esc(d.repName)}" placeholder="кто забирает товар" onchange="setReturnDraftField('repName', this.value)">
+      </div>
+      <div class="field">
+        <label>ИИН представителя</label>
+        <input type="text" inputmode="numeric" maxlength="12" value="${esc(d.repIin)}" placeholder="12 цифр" onchange="setReturnDraftField('repIin', this.value.replace(/\\D/g, ''))">
+      </div>
+      <div class="field">
+        <label>Примечание</label>
+        <input type="text" value="${esc(d.note)}" placeholder="необязательно" onchange="setReturnDraftField('note', this.value)">
+      </div>
+    </div>
+  </div>
+
+  <div class="stock-scan-row">
+    <button class="stock-camera-btn ret-camera" onclick="openReturnCamera()">${CAMERA_ICON}<span>Сканировать</span></button>
+    <div class="stock-search-wrap">
+      <input id="return-search-input" class="kassa-search-input" type="text" autocomplete="off"
+        placeholder="Штрихкод (USB-сканер) или название товара"
+        value="${esc(state.returnSearch)}"
+        oninput="handleReturnSearchInput(this.value)"
+        onkeydown="handleReturnSearchKey(event, this.value)">
+      ${matches.length ? `
+      <div class="stock-search-results">
+        ${matches.map(p => `<button onclick="pickReturnSearchResult(${p.id})"><span>${esc(p.name)}</span><span class="mono">${formatQty(p.stock, p.unit)}</span></button>`).join('')}
+      </div>` : ''}
+    </div>
+  </div>
+
+  ${supProducts.length ? `
+  <div class="ret-quick">
+    <div class="ret-quick-title">Товары от этого поставщика — нажмите, чтобы добавить</div>
+    <div class="ret-quick-list">
+      ${supProducts.map(p => `<button onclick="addToReturnDraft(${p.id}, 1)"><span>${esc(p.name)}</span><small>${formatQty(Number(p.stock) - returnQtyInDraft(p.id), p.unit)}</small></button>`).join('')}
+    </div>
+  </div>` : ''}
+
+  <div class="panel stock-items-panel">
+    ${d.items.length ? `
+    <div class="ret-items-head">
+      <span>Причина для всех:</span>
+      ${RETURN_REASONS.map(r => `<button class="${d.defaultReason === r.id ? 'active' : ''}" onclick="setAllReturnReasons('${r.id}')">${r.label}</button>`).join('')}
+    </div>
+    ${itemsHtml}` : `<div class="empty-state">Отсканируйте товар, который забирает поставщик, или найдите его по названию.</div>`}
+  </div>
+
+  <div class="stock-footer">
+    <div class="kassa-total-box">
+      <span class="kassa-total-label">${d.items.length} поз. к возврату${isAdmin ? ' · сумма' : ''}</span>
+      ${isAdmin ? `<span class="kassa-total-value">${fmt(returnDraftTotal())}</span>` : ''}
+    </div>
+    <div class="kassa-footer-actions">
+      <button class="kassa-btn-clear" ${d.items.length === 0 && !d.repName ? 'disabled' : ''} onclick="clearReturnDraft()">Очистить</button>
+      <button class="kassa-btn-pay ret-post" ${d.items.length === 0 ? 'disabled' : ''} onclick="postSupplierReturn()">Провести возврат</button>
+    </div>
+  </div>`;
+}
+
+function renderSupplierReturnModal() {
+  const r = state.stockReturnToShow;
+  if (!r) return '';
+  const isAdmin = state.currentUser.role === 'admin';
+  const items = r.items || [];
+  const reasons = [...new Set(items.map(i => reasonLabel(i.reason)))].join(', ');
+  const rows = items.map((i, idx) => `
     <tr>
-      <td class="num">№${r.id}</td>
-      <td>${fmtDate(r.created_at)}</td>
-      <td>${esc(r.supplier_name || '—')}</td>
-      <td class="mono">${esc(r.doc_number || '—')}</td>
-      <td class="num">${r.items_count}</td>
-      ${isAdmin ? `<td class="num">${fmt(r.total)}</td>` : ''}
-      <td>${esc(r.user_name || '—')}</td>
-      <td class="row-actions"><button class="btn btn-ghost btn-sm" onclick="openStockReceipt(${r.id})">Открыть</button></td>
+      <td>${idx + 1}</td>
+      <td>${esc(i.product_name)}${i.barcode ? `<div class="act-bc">${esc(i.barcode)}</div>` : ''}</td>
+      <td class="act-num">${formatQty(i.qty, i.unit)}</td>
+      ${isAdmin ? `<td class="act-num">${fmt(i.cost_price)}</td><td class="act-num">${fmt(i.subtotal)}</td>` : ''}
+      <td>${esc(reasonLabel(i.reason))}</td>
     </tr>`).join('');
   return `
-  <div class="panel">
-    <table>
-      <thead><tr><th>Приход</th><th>Дата</th><th>Поставщик</th><th>Накладная</th><th>Поз.</th>${isAdmin ? '<th>Сумма</th>' : ''}<th>Принял</th><th></th></tr></thead>
-      <tbody>${rows}</tbody>
-    </table>
-    ${list.length === 0 ? '<div class="empty-state">Приходов пока нет.</div>' : ''}
+  <div class="modal-overlay" onclick="if(event.target===this) closeSupplierReturnModal()">
+    <div class="modal-card act-card">
+      <div class="modal-close-row"><button class="icon-btn" onclick="closeSupplierReturnModal()" aria-label="Закрыть">×</button></div>
+      <div class="receipt act">
+        <div class="act-title">Акт возврата товара поставщику № ${r.id}</div>
+        <div class="act-date">от ${r.created_at ? new Date(r.created_at).toLocaleDateString('ru-RU') : ''} г.</div>
+        <table class="act-meta">
+          <tr><td>Поставщик (получатель)</td><td><b>${esc(r.supplier_name || '—')}</b>${r.supplier_bin ? `, БИН/ИИН ${esc(r.supplier_bin)}` : ''}</td></tr>
+          <tr><td>Покупатель (возвращает)</td><td>Магазин «Хмель»</td></tr>
+          <tr><td>Доверенность</td><td>№ ${esc(r.poa_number || '—')}${r.poa_date ? ` от ${fmtDay(r.poa_date)}` : ''}</td></tr>
+          <tr><td>Представитель поставщика</td><td>${esc(r.representative_name || '—')}${r.representative_iin ? `, ИИН ${esc(r.representative_iin)}` : ''}</td></tr>
+          <tr><td>Причина возврата</td><td>${esc(reasons || '—')}</td></tr>
+        </table>
+        <table class="act-table">
+          <thead><tr><th>№</th><th>Наименование</th><th>Кол-во</th>${isAdmin ? '<th>Цена</th><th>Сумма</th>' : ''}<th>Причина</th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+        <div class="act-total">Всего наименований: ${items.length}${isAdmin ? `, на сумму <b>${fmt(r.total)}</b>` : ''}</div>
+        ${r.note ? `<div class="act-note">Примечание: ${esc(r.note)}</div>` : ''}
+        <div class="act-text">Товар передан представителю поставщика. Претензий по количеству стороны не имеют.</div>
+        <div class="act-signs">
+          <div><div class="act-sign-role">Сдал (магазин)</div><div class="act-sign-line"></div><div class="act-sign-name">${esc(r.user_name || '')}</div></div>
+          <div><div class="act-sign-role">Принял по доверенности № ${esc(r.poa_number || '')}</div><div class="act-sign-line"></div><div class="act-sign-name">${esc(r.representative_name || '')}</div></div>
+        </div>
+      </div>
+      <div class="receipt-actions">
+        ${isAdmin ? `<button class="btn btn-danger" style="flex:1;" onclick="cancelSupplierReturn(${r.id})">Отменить возврат</button>` : ''}
+        <button class="btn btn-ghost" style="flex:1;" onclick="window.print()">Печать акта</button>
+        <button class="btn btn-primary" style="flex:1;" onclick="closeSupplierReturnModal()">Готово</button>
+      </div>
+    </div>
   </div>`;
 }
 
@@ -2443,6 +2849,7 @@ function render() {
     </div>
     ${renderReceiptModal()}
     ${renderStockReceiptModal()}
+    ${renderSupplierReturnModal()}
     ${state.toast ? `<div class="toast">${esc(state.toast)}</div>` : ''}
   `;
   if (state.view === 'pos' && !state.receiptToShow && !state.showPaymentModal) focusScanInput();
