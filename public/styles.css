@@ -461,10 +461,17 @@ td input, td select{ padding:6px 8px; border-radius:6px; border:1px solid var(--
 .scanner-card{ background:#fff; border-radius:14px; width:100%; max-width:480px; overflow:hidden; box-shadow:0 30px 60px rgba(0,0,0,0.35); display:flex; flex-direction:column; max-height: calc(100dvh - 32px); }
 .scanner-head{ display:flex; justify-content:space-between; align-items:center; padding:12px 14px; background: linear-gradient(90deg, var(--amber), var(--amber-dark)); color:#fff; font-family:'Oswald',sans-serif; text-transform:uppercase; letter-spacing:0.04em; font-weight:600; }
 .scanner-head .icon-btn{ background: rgba(255,255,255,0.15); border-color: rgba(255,255,255,0.3); color:#fff; }
-.scanner-video-wrap{ background:#000; position:relative; min-height:240px; }
-#scanner-video{ width:100%; }
-#scanner-video video{ width:100% !important; height:auto !important; display:block; object-fit:cover; }
-#scanner-video img{ display:none; } /* служебная картинка библиотеки */
+.scanner-video-wrap{ background:#000; position:relative; min-height:240px; overflow:hidden; }
+#scanner-video{ width:100%; height:100%; display:block; object-fit:cover; aspect-ratio: 4 / 3; background:#000; }
+/* Прицел: зона, которую распознаём (86% × 70% кадра) */
+.scanner-aim{ position:absolute; left:7%; right:7%; top:15%; bottom:15%; border-radius:14px; box-shadow:0 0 0 9999px rgba(0,0,0,0.38); pointer-events:none; transition: box-shadow .2s; }
+.scanner-aim::before{ content:''; position:absolute; inset:0; border-radius:14px; border:3px solid rgba(255,255,255,0.85); transition: border-color .2s; }
+.scanner-line{ position:absolute; left:6%; right:6%; top:50%; height:2px; background: linear-gradient(90deg, transparent, #ff5a3c, transparent); box-shadow:0 0 12px #ff5a3c; animation: scanLine 2.2s ease-in-out infinite; }
+@keyframes scanLine{ 0%,100%{ top:18%; } 50%{ top:82%; } }
+.scanner-aim.hit::before{ border-color:#7bd35a; }
+.scanner-aim.hit{ animation: aimHit .45s ease; }
+.scanner-aim.miss::before{ border-color:#ff6b5a; }
+@keyframes aimHit{ 0%{ box-shadow:0 0 0 9999px rgba(75,140,58,0.45); } 100%{ box-shadow:0 0 0 9999px rgba(0,0,0,0.38); } }
 .scanner-status{ padding:12px 14px; font-size:0.92rem; font-weight:600; text-align:center; background: var(--surface-alt); color: var(--ink-soft); min-height:48px; display:flex; align-items:center; justify-content:center; }
 .scanner-status.ok{ background:#e3eed8; color: var(--hop); }
 .scanner-status.error{ background: var(--danger-bg); color: var(--danger); }
@@ -473,6 +480,7 @@ td input, td select{ padding:6px 8px; border-radius:6px; border:1px solid var(--
   .scanner-overlay{ padding:0; align-items:stretch; }
   .scanner-card{ max-width:none; border-radius:0; max-height:none; height:100dvh; }
   .scanner-video-wrap{ flex:1; display:flex; align-items:center; }
+  #scanner-video{ aspect-ratio:auto; height:100%; }
   .scanner-actions{ padding-bottom: max(14px, env(safe-area-inset-bottom)); }
   .scanner-actions .btn{ min-height:50px; font-size:1rem; }
 }

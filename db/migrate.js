@@ -22,6 +22,13 @@ async function main() {
     }
   } catch (err) {
     console.error('Ошибка миграции:', err.message);
+    if (err.detail) console.error('Подробнее:', err.detail);
+    if (err.position) {
+      // Показываем строку schema.sql, на которой споткнулась база
+      const schema = fs.readFileSync(path.join(__dirname, 'schema.sql'), 'utf8');
+      const line = schema.slice(0, Number(err.position)).split('\n').length;
+      console.error(`Строка schema.sql: ${line}: ${schema.split('\n')[line - 1].trim()}`);
+    }
     process.exitCode = 1;
   } finally {
     await pool.end();

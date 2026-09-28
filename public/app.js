@@ -1637,13 +1637,22 @@ const CAMERA_ICON = `<svg width="20" height="20" viewBox="0 0 24 24" fill="none"
 // Окно камеры живёт в отдельном контейнере вне #app — иначе render() пересоздавал бы видео.
 const Scanner = {
   open: false,
-  instance: null,
+  session: 0,        // номер открытия окна — защищает от «догоняющих» старых кадров
   continuous: false,
   onCode: null,
   lastCode: '',
   lastAt: 0,
+  stream: null,
+  track: null,
+  deviceId: '',
   cameras: [],
-  cameraIndex: -1,
+  torch: false,
+  worker: null,       // фоновый поток распознавания (scan-worker.js)
+  engineReady: false,
+  busy: false,        // кадр сейчас распознаётся — следующий не шлём
+  frameId: 0,
+  sessionFirstFrame: 0,
+  timer: null,
 };
 
 // Из QR/DataMatrix маркировки (GS1: 01 + GTIN-14 + ...) достаём обычный штрихкод EAN-13,
@@ -1651,7 +1660,7 @@ const Scanner = {
 function barcodeCandidates(raw) {
   const code = String(raw || '').replace(/[\u001d\u0000-\u001f]/g, '').trim();
   const list = [code];
-  const gs1 = code.match(/^(?:\]d2|\]C1|\]Q3)?01(\d{14})/);
+  const gs1 = code.match(/^(?:\]d2|\]C1|\]Q3)?(?:01|\(01\))(\d{14})/);
   if (gs1) {
     const gtin = gs1[1];
     list.push(gtin);
@@ -1691,15 +1700,12 @@ function setScannerStatus(text, kind) {
 }
 
 async function openCameraScanner({ title, continuous, onCode }) {
-  if (typeof Html5Qrcode === 'undefined') {
-    showToast('Модуль камеры не загрузился — проверьте интернет и обновите страницу');
-    return;
-  }
-  if (!window.isSecureContext) {
+  if (!window.isSecureContext || !navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
     showToast('Камера работает только по https:// или на localhost');
     return;
   }
-  await closeCameraScanner();
+  closeCameraScanner();
+  const session = ++Scanner.session;
   let root = document.getElementById('scanner-root');
   if (!root) { root = document.createElement('div'); root.id = 'scanner-root'; document.body.appendChild(root); }
   root.innerHTML = `
@@ -1709,9 +1715,13 @@ async function openCameraScanner({ title, continuous, onCode }) {
           <span>${esc(title)}</span>
           <button class="icon-btn" onclick="closeCameraScanner()" aria-label="Закрыть">×</button>
         </div>
-        <div class="scanner-video-wrap"><div id="scanner-video"></div></div>
+        <div class="scanner-video-wrap">
+          <video id="scanner-video" playsinline muted autoplay></video>
+          <div class="scanner-aim"><span class="scanner-line"></span></div>
+        </div>
         <div id="scanner-status" class="scanner-status">Запускаю камеру…</div>
         <div class="scanner-actions">
+          <button id="scanner-torch" class="btn btn-ghost" onclick="toggleScannerTorch()" style="display:none;">Фонарик</button>
           <button id="scanner-switch" class="btn btn-ghost" onclick="switchScannerCamera()" style="display:none;">Другая камера</button>
           <button class="btn btn-hop" style="flex:1;" onclick="closeCameraScanner()">${continuous ? 'Готово' : 'Отмена'}</button>
         </div>
@@ -1722,73 +1732,134 @@ async function openCameraScanner({ title, continuous, onCode }) {
   Scanner.onCode = onCode;
   Scanner.lastCode = '';
   Scanner.lastAt = 0;
-  document.activeElement && document.activeElement.blur && document.activeElement.blur();
+  Scanner.sessionFirstFrame = Scanner.frameId;
+  if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
 
-  const F = window.Html5QrcodeSupportedFormats || {};
-  const formats = ['QR_CODE', 'EAN_13', 'EAN_8', 'UPC_A', 'UPC_E', 'CODE_128', 'CODE_39', 'CODE_93', 'ITF', 'DATA_MATRIX']
-    .map(k => F[k]).filter(v => v !== undefined);
-  Scanner.instance = new Html5Qrcode('scanner-video', {
-    verbose: false,
-    formatsToSupport: formats.length ? formats : undefined,
-    experimentalFeatures: { useBarCodeDetectorIfSupported: true },
-  });
-
+  ensureScanWorker(); // WASM грузится параллельно с запуском камеры
+  const ok = await startScannerStream(session);
+  if (!ok || session !== Scanner.session) return;
+  setScannerStatus(Scanner.engineReady ? 'Наведите камеру на штрихкод или QR-код' : 'Загружаю распознавание…');
+  scanLoop(session);
+  // Кнопки «Другая камера» и «Фонарик» — только если это возможно
   try {
-    await startScannerCamera({ facingMode: 'environment' });
-  } catch (err) {
-    // Моноблоки/ноутбуки: задней камеры нет — берём первую доступную
-    try {
-      Scanner.cameras = await Html5Qrcode.getCameras();
-      if (!Scanner.cameras.length) throw new Error('Камера не найдена');
-      Scanner.cameraIndex = 0;
-      await startScannerCamera(Scanner.cameras[0].id);
-    } catch (err2) {
-      const msg = String(err2 && (err2.name || err2.message || err2));
-      setScannerStatus(/NotAllowed|Permission/i.test(msg)
-        ? 'Нет доступа к камере. Разрешите доступ в настройках браузера (значок замка в адресной строке) и попробуйте снова.'
-        : 'Камера не найдена или занята другим приложением.', 'error');
-      return;
-    }
-  }
-  setScannerStatus('Наведите камеру на штрихкод или QR-код');
-  // Показываем «Другая камера», если их несколько
-  try {
-    if (!Scanner.cameras.length) Scanner.cameras = await Html5Qrcode.getCameras();
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    Scanner.cameras = devices.filter(d => d.kind === 'videoinput');
     const btn = document.getElementById('scanner-switch');
     if (btn && Scanner.cameras.length > 1) btn.style.display = '';
   } catch (e) {}
 }
 
-async function startScannerCamera(cameraConfig) {
-  await Scanner.instance.start(
-    cameraConfig,
-    {
-      fps: 12,
-      qrbox: (w, h) => {
-        const width = Math.floor(Math.min(w * 0.86, 380));
-        const height = Math.floor(Math.min(h * 0.62, 240, width));
-        return { width, height };
-      },
-      aspectRatio: 1.333,
-    },
-    onScannerDecoded,
-    () => { /* кадр без кода — это нормально */ }
-  );
+// Запуск камеры с таймаутом: если камера занята или «молчит», не висим бесконечно
+async function startScannerStream(session) {
+  const saved = (() => { try { return localStorage.getItem('beershop_camera') || ''; } catch (e) { return ''; } })();
+  const deviceId = Scanner.deviceId || saved;
+  const base = { width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 30, max: 30 } };
+  const attempts = deviceId
+    ? [{ ...base, deviceId: { exact: deviceId } }, { ...base, facingMode: { ideal: 'environment' } }]
+    : [{ ...base, facingMode: { ideal: 'environment' } }, {}];
+  let lastErr = null;
+  for (const video of attempts) {
+    try {
+      const stream = await withTimeout(navigator.mediaDevices.getUserMedia({ video, audio: false }), 10000);
+      if (session !== Scanner.session) { stream.getTracks().forEach(t => t.stop()); return false; }
+      Scanner.stream = stream;
+      const v = document.getElementById('scanner-video');
+      v.srcObject = stream;
+      await withTimeout(v.play(), 5000).catch(() => {});
+      const track = stream.getVideoTracks()[0];
+      Scanner.track = track;
+      Scanner.deviceId = track.getSettings ? track.getSettings().deviceId || '' : '';
+      try { const caps = track.getCapabilities ? track.getCapabilities() : {}; if (caps.torch) document.getElementById('scanner-torch').style.display = ''; } catch (e) {}
+      return true;
+    } catch (err) { lastErr = err; }
+  }
+  const name = String(lastErr && (lastErr.name || lastErr.message) || lastErr);
+  setScannerStatus(
+    /NotAllowed|Permission|Security/i.test(name) ? 'Нет доступа к камере. Разрешите камеру в браузере (значок замка в адресной строке) и откройте сканер снова.'
+      : /timeout/i.test(name) ? 'Камера не отвечает. Закройте другие программы, которые её используют (Zoom, WhatsApp, другая вкладка), и попробуйте снова.'
+      : /NotReadable|TrackStart|Abort/i.test(name) ? 'Камера занята другой программой или вкладкой. Закройте её и попробуйте снова.'
+      : 'Камера не найдена. Проверьте, что она подключена.', 'error');
+  return false;
+}
+function withTimeout(promise, ms) {
+  return Promise.race([promise, new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), ms))]);
+}
+
+function ensureScanWorker() {
+  if (Scanner.worker) return;
+  try {
+    const w = new Worker('/scan-worker.js?v=1');
+    Scanner.worker = w;
+    w.onmessage = (e) => {
+      const m = e.data || {};
+      if (m.type === 'ready') {
+        Scanner.engineReady = true;
+        if (Scanner.open && /Загружаю/.test(document.getElementById('scanner-status')?.textContent || '')) setScannerStatus('Наведите камеру на штрихкод или QR-код');
+      } else if (m.type === 'result') {
+        Scanner.busy = false;
+        if (m.text && m.id > Scanner.sessionFirstFrame) onScannerDecoded(m.text);
+      } else if (m.type === 'error') {
+        setScannerStatus('Не удалось загрузить распознавание: ' + m.error, 'error');
+      }
+    };
+    w.onerror = () => { Scanner.busy = false; };
+  } catch (e) {
+    setScannerStatus('Браузер не поддерживает фоновое распознавание — обновите браузер', 'error');
+  }
+}
+
+// Цикл: берём кадр, только когда фоновый поток освободился (не копим очередь),
+// вырезаем центральную зону прицела и уменьшаем до ~720px — этого хватает для штрихкода.
+function scanLoop(session) {
+  if (session !== Scanner.session || !Scanner.open) return;
+  const v = document.getElementById('scanner-video');
+  const next = () => { Scanner.timer = setTimeout(() => scanLoop(session), 90); };
+  if (!v || !v.videoWidth || !Scanner.engineReady || Scanner.busy || document.hidden) { next(); return; }
+  const vw = v.videoWidth, vh = v.videoHeight;
+  const sw = Math.round(vw * 0.86), sh = Math.round(vh * 0.7);
+  const sx = Math.round((vw - sw) / 2), sy = Math.round((vh - sh) / 2);
+  const scale = Math.min(1, 720 / sw);
+  const w = Math.round(sw * scale), h = Math.round(sh * scale);
+  Scanner.busy = true;
+  const id = ++Scanner.frameId;
+  const send = (frame, transfer) => { try { Scanner.worker.postMessage({ type: 'frame', id, frame }, transfer); } catch (e) { Scanner.busy = false; } };
+  if (window.createImageBitmap && typeof OffscreenCanvas !== 'undefined') {
+    createImageBitmap(v, sx, sy, sw, sh, { resizeWidth: w, resizeHeight: h, resizeQuality: 'low' })
+      .then(bmp => { if (session === Scanner.session) send(bmp, [bmp]); else { bmp.close(); Scanner.busy = false; } })
+      .catch(() => { Scanner.busy = false; });
+  } else {
+    // Старые браузеры: кадр в ImageData на основном потоке (дёшево — картинка маленькая)
+    Scanner.canvas = Scanner.canvas || document.createElement('canvas');
+    const c = Scanner.canvas; c.width = w; c.height = h;
+    const cx = c.getContext('2d', { willReadFrequently: true });
+    cx.drawImage(v, sx, sy, sw, sh, 0, 0, w, h);
+    const img = cx.getImageData(0, 0, w, h);
+    send(img, [img.data.buffer]);
+  }
+  next();
 }
 
 async function switchScannerCamera() {
-  if (!Scanner.instance || Scanner.cameras.length < 2) return;
-  Scanner.cameraIndex = (Scanner.cameraIndex + 1) % Scanner.cameras.length;
-  try {
-    if (Scanner.instance.isScanning) await Scanner.instance.stop();
-    await startScannerCamera(Scanner.cameras[Scanner.cameraIndex].id);
-    setScannerStatus('Камера: ' + (Scanner.cameras[Scanner.cameraIndex].label || (Scanner.cameraIndex + 1)));
-  } catch (e) { setScannerStatus('Не удалось переключить камеру', 'error'); }
+  if (!Scanner.cameras || Scanner.cameras.length < 2) return;
+  const idx = Scanner.cameras.findIndex(c => c.deviceId === Scanner.deviceId);
+  const nextCam = Scanner.cameras[(idx + 1) % Scanner.cameras.length];
+  stopScannerStream();
+  Scanner.deviceId = nextCam.deviceId;
+  try { localStorage.setItem('beershop_camera', nextCam.deviceId); } catch (e) {}
+  setScannerStatus('Переключаю камеру…');
+  const session = Scanner.session;
+  if (await startScannerStream(session)) setScannerStatus('Камера: ' + (nextCam.label || 'другая'));
+}
+
+async function toggleScannerTorch() {
+  if (!Scanner.track) return;
+  Scanner.torch = !Scanner.torch;
+  try { await Scanner.track.applyConstraints({ advanced: [{ torch: Scanner.torch }] }); } catch (e) { Scanner.torch = false; }
 }
 
 function onScannerDecoded(decodedText) {
   const code = String(decodedText || '').trim();
-  if (!code || !Scanner.onCode) return;
+  if (!code || !Scanner.onCode || !Scanner.open) return;
   const now = Date.now();
   // Тот же код, пока он в кадре, не считываем повторно чаще раза в 1.8 сек
   if (code === Scanner.lastCode && now - Scanner.lastAt < 1800) return;
@@ -1798,17 +1869,27 @@ function onScannerDecoded(decodedText) {
   scannerBeep(result.ok !== false);
   if (result.close || !Scanner.continuous) { closeCameraScanner(); return; }
   setScannerStatus(result.message || code, result.ok === false ? 'error' : 'ok');
+  const aim = document.querySelector('.scanner-aim');
+  if (aim) { aim.classList.remove('hit', 'miss'); void aim.offsetWidth; aim.classList.add(result.ok === false ? 'miss' : 'hit'); }
 }
 
-async function closeCameraScanner() {
-  const inst = Scanner.instance;
-  Scanner.instance = null;
+function stopScannerStream() {
+  if (Scanner.stream) { Scanner.stream.getTracks().forEach(t => { try { t.stop(); } catch (e) {} }); }
+  Scanner.stream = null;
+  Scanner.track = null;
+  Scanner.torch = false;
+  const v = document.getElementById('scanner-video');
+  if (v) v.srcObject = null;
+}
+
+// Закрытие мгновенное и синхронное: ничего не ждём, поэтому окно не может «зависнуть»
+function closeCameraScanner() {
+  Scanner.session++;
+  clearTimeout(Scanner.timer);
+  stopScannerStream();
   Scanner.open = false;
   Scanner.onCode = null;
-  if (inst) {
-    try { if (inst.isScanning) await inst.stop(); } catch (e) {}
-    try { inst.clear(); } catch (e) {}
-  }
+  Scanner.busy = false;
   const root = document.getElementById('scanner-root');
   if (root) root.innerHTML = '';
   if (state.view === 'pos' && !state.receiptToShow && !state.showPaymentModal) focusScanInput();
@@ -2241,7 +2322,7 @@ function renderStockHistory() {
       <td class="mono">${esc(r.doc_number || '—')}</td>
       <td class="num">${r.items_count}</td>
       ${isAdmin ? `<td class="num">${fmt(r.total)}</td>` : ''}
-      <td>${esc(r.user_name)}</td>
+      <td>${esc(r.user_name || '—')}</td>
       <td class="row-actions"><button class="btn btn-ghost btn-sm" onclick="openStockReceipt(${r.id})">Открыть</button></td>
     </tr>`).join('');
   return `
@@ -2324,7 +2405,7 @@ function renderStockReceiptModal() {
           <div class="shop">Приход №${r.id}</div>
           <div class="meta">${fmtDate(r.created_at)}<br>
             Поставщик: ${esc(r.supplier_name || '—')}${r.doc_number ? '<br>Накладная: ' + esc(r.doc_number) : ''}<br>
-            Принял: ${esc(r.user_name)}</div>
+            Принял: ${esc(r.user_name || '—')}</div>
         </div>
         ${lines}
         ${isAdmin ? `<div class="receipt-total"><span>Сумма закупа</span><span>${fmt(r.total)}</span></div>` : ''}

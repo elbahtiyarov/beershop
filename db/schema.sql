@@ -87,6 +87,13 @@ CREATE TABLE IF NOT EXISTS suppliers (
   note TEXT,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+-- Таблица могла остаться от старой версии — добавляем недостающие колонки
+ALTER TABLE suppliers ADD COLUMN IF NOT EXISTS name VARCHAR(200);
+ALTER TABLE suppliers ADD COLUMN IF NOT EXISTS phone VARCHAR(50);
+ALTER TABLE suppliers ADD COLUMN IF NOT EXISTS bin VARCHAR(20);
+ALTER TABLE suppliers ADD COLUMN IF NOT EXISTS contact_person VARCHAR(100);
+ALTER TABLE suppliers ADD COLUMN IF NOT EXISTS note TEXT;
+ALTER TABLE suppliers ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT now();
 CREATE UNIQUE INDEX IF NOT EXISTS idx_suppliers_name ON suppliers(LOWER(name));
 
 -- Приходные накладные (поступление товара на склад)
@@ -101,6 +108,14 @@ CREATE TABLE IF NOT EXISTS stock_receipts (
   user_name VARCHAR(100) NOT NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+ALTER TABLE stock_receipts ADD COLUMN IF NOT EXISTS supplier_id INTEGER REFERENCES suppliers(id) ON DELETE SET NULL;
+ALTER TABLE stock_receipts ADD COLUMN IF NOT EXISTS supplier_name VARCHAR(200);
+ALTER TABLE stock_receipts ADD COLUMN IF NOT EXISTS doc_number VARCHAR(100);
+ALTER TABLE stock_receipts ADD COLUMN IF NOT EXISTS note TEXT;
+ALTER TABLE stock_receipts ADD COLUMN IF NOT EXISTS total NUMERIC(12,2) NOT NULL DEFAULT 0;
+ALTER TABLE stock_receipts ADD COLUMN IF NOT EXISTS user_id INTEGER REFERENCES users(id) ON DELETE SET NULL;
+ALTER TABLE stock_receipts ADD COLUMN IF NOT EXISTS user_name VARCHAR(100);
+ALTER TABLE stock_receipts ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT now();
 CREATE INDEX IF NOT EXISTS idx_stock_receipts_created_at ON stock_receipts(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_stock_receipts_supplier ON stock_receipts(supplier_id);
 
@@ -115,7 +130,36 @@ CREATE TABLE IF NOT EXISTS stock_receipt_items (
   cost_price NUMERIC(10,2) NOT NULL DEFAULT 0,
   subtotal NUMERIC(12,2) NOT NULL DEFAULT 0
 );
+ALTER TABLE stock_receipt_items ADD COLUMN IF NOT EXISTS stock_receipt_id INTEGER REFERENCES stock_receipts(id) ON DELETE CASCADE;
+ALTER TABLE stock_receipt_items ADD COLUMN IF NOT EXISTS product_id INTEGER REFERENCES products(id) ON DELETE SET NULL;
+ALTER TABLE stock_receipt_items ADD COLUMN IF NOT EXISTS product_name VARCHAR(200);
+ALTER TABLE stock_receipt_items ADD COLUMN IF NOT EXISTS barcode VARCHAR(64);
+ALTER TABLE stock_receipt_items ADD COLUMN IF NOT EXISTS unit VARCHAR(10) NOT NULL DEFAULT 'шт';
+ALTER TABLE stock_receipt_items ADD COLUMN IF NOT EXISTS qty NUMERIC(10,2);
+ALTER TABLE stock_receipt_items ADD COLUMN IF NOT EXISTS cost_price NUMERIC(10,2) NOT NULL DEFAULT 0;
+ALTER TABLE stock_receipt_items ADD COLUMN IF NOT EXISTS subtotal NUMERIC(12,2) NOT NULL DEFAULT 0;
+-- Дробное количество для разливного
+ALTER TABLE stock_receipt_items ALTER COLUMN qty TYPE NUMERIC(10,2) USING qty::numeric;
 CREATE INDEX IF NOT EXISTS idx_stock_receipt_items_receipt ON stock_receipt_items(stock_receipt_id);
+
+-- Старые версии таблиц склада могли содержать свои обязательные колонки,
+-- которые новый код не заполняет, — снимаем с них NOT NULL, чтобы приход проводился.
+DO $$
+DECLARE r RECORD;
+BEGIN
+  FOR r IN
+    SELECT table_name, column_name FROM information_schema.columns
+     WHERE table_schema = current_schema()
+       AND is_nullable = 'NO' AND column_default IS NULL
+       AND (table_name, column_name) NOT IN (
+         ('suppliers','id'), ('stock_receipts','id'), ('stock_receipt_items','id'),
+         ('suppliers','name'), ('stock_receipts','user_name'),
+         ('stock_receipt_items','stock_receipt_id'), ('stock_receipt_items','product_name'), ('stock_receipt_items','qty'))
+       AND table_name IN ('suppliers', 'stock_receipts', 'stock_receipt_items')
+  LOOP
+    EXECUTE format('ALTER TABLE %I ALTER COLUMN %I DROP NOT NULL', r.table_name, r.column_name);
+  END LOOP;
+END $$;
 
 -- Триггер для updated_at у товаров
 CREATE OR REPLACE FUNCTION set_updated_at() RETURNS TRIGGER AS $$
