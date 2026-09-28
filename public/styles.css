@@ -983,3 +983,87 @@ button.pl-stat{ cursor:pointer; }
   html, body{ background:#fff !important; background-image:none !important; }
   .receipt.act{ font-size:12pt; padding:0 8mm; }
 }
+
+/* ================= СМЕНА ================= */
+.pos2-head-btns{ display:flex; gap:8px; }
+.pos2-shift-btn{ display:inline-flex; align-items:center; gap:6px; height:42px; padding:0 14px; border-radius:10px; border:1px solid var(--border); background: var(--surface-alt); color: var(--ink); font-weight:700; font-size:0.85rem; }
+.pos2-shift-btn:active{ background: var(--amber); color:#fff; }
+.pos2-head-btns .pos2-clear{ padding:0 12px; }
+
+.shift-gate{ height:100%; min-height:420px; display:flex; align-items:center; justify-content:center; padding:20px; }
+.shift-gate-card{ background:#fff; border-radius:20px; padding:36px 32px 28px; max-width:440px; width:100%; text-align:center; box-shadow:0 1px 3px rgba(42,33,24,0.08), 0 0 0 1px var(--border), 0 20px 50px rgba(42,33,24,0.1); }
+.shift-gate-ico{ width:84px; height:84px; border-radius:50%; margin:0 auto 16px; background: linear-gradient(160deg, #fbf3e2, #f1e3c4); color: var(--amber-dark); display:flex; align-items:center; justify-content:center; }
+.shift-gate-card h2{ font-size:1.6rem; }
+.shift-gate-card p{ color: var(--ink-soft); font-size:0.95rem; line-height:1.5; margin:10px 0 22px; }
+.shift-gate-btn{ height:66px; }
+.shift-gate-user{ margin-top:14px; font-size:0.82rem; color: var(--ink-soft); }
+
+.sh-head-title{ font-family:'Oswald',sans-serif; text-transform:uppercase; letter-spacing:0.04em; font-size:1.35rem; font-weight:600; line-height:1.2; }
+.sh-hint{ font-size:0.85rem; color: var(--ink-soft); background: var(--surface-alt); border-radius:10px; padding:10px 14px; line-height:1.45; }
+.sh-caption{ font-size:0.74rem; text-transform:uppercase; letter-spacing:0.05em; color: var(--ink-soft); font-weight:700; }
+.sh-grid{ display:grid; grid-template-columns: 1fr 1fr; gap:8px; }
+.sh-tile{ background: var(--surface-alt); border-radius:12px; padding:10px 14px; display:flex; flex-direction:column; gap:2px; }
+.sh-tile span{ font-size:0.72rem; text-transform:uppercase; letter-spacing:0.04em; color: var(--ink-soft); font-weight:600; }
+.sh-tile b{ font-family:'JetBrains Mono',monospace; font-size:1.25rem; }
+.sh-cash{ border:1px solid var(--border); border-radius:12px; padding:4px 14px; }
+.sh-row{ display:flex; justify-content:space-between; gap:10px; padding:8px 0; border-bottom:1px dashed var(--border); font-size:0.92rem; }
+.sh-row:last-child{ border-bottom:none; }
+.sh-row b{ font-family:'JetBrains Mono',monospace; }
+.sh-row.total b{ font-size:1.15rem; color: var(--amber-dark); }
+.sh-row.total span{ font-weight:700; }
+.sh-row.big{ background: var(--surface-alt); border-radius:12px; padding:12px 16px; border:none; }
+.sh-row.big b{ font-size:1.5rem; }
+.sh-moves{ display:flex; flex-direction:column; gap:4px; max-height:140px; overflow-y:auto; }
+.sh-move{ display:flex; justify-content:space-between; font-size:0.85rem; padding:6px 10px; border-radius:8px; background: var(--surface-alt); }
+.sh-move.in b{ color: var(--hop); }
+.sh-move.out b{ color:#9a4a2a; }
+.sh-actions{ display:flex; flex-direction:column; gap:10px; }
+.sh-act{ display:flex; align-items:center; gap:14px; min-height:84px; padding:0 18px; border-radius:16px; border:2px solid var(--border); background:#fff; text-align:left; font-weight:700; font-size:1.1rem; color: var(--ink); }
+.sh-act span{ display:flex; flex-direction:column; }
+.sh-act small{ font-weight:500; font-size:0.78rem; color: var(--ink-soft); margin-top:2px; }
+.sh-act.in .ico{ color: var(--hop); }
+.sh-act.out .ico{ color:#9a4a2a; }
+.sh-act.close{ border-color: var(--amber); background:#fdf3e1; }
+.sh-act.close .ico{ color: var(--amber-dark); }
+.sh-act:active{ transform: scale(0.98); }
+.sh-reasons{ display:flex; flex-wrap:wrap; gap:8px; }
+.sh-reasons button{ min-height:48px; padding:0 16px; border-radius:12px; border:1px solid var(--border); background:#fff; font-weight:600; font-size:0.92rem; color: var(--ink); }
+.sh-reasons button.active{ background: var(--ink); border-color: var(--ink); color:#fff; }
+.sh-note{ width:100%; min-height:48px; padding:10px 14px; border-radius:12px; border:1px solid var(--border); background: var(--surface-alt); font-size:0.95rem; }
+.pay2-change.over{ background:#fbf0d9; color:#8a5a0f; }
+.sh-close-btn{ background: linear-gradient(180deg, #d0861a, var(--amber) 40%, var(--amber-dark)); box-shadow:0 8px 20px rgba(193,120,15,0.35); }
+
+/* Z-отчёт (печать как чек) */
+.z-title{ font-weight:700; font-size:0.9rem; margin-top:6px; text-transform:uppercase; letter-spacing:0.04em; }
+.z-sep{ border-top:1px dashed #b7ab97; margin:10px 0; }
+.z-diff{ display:flex; justify-content:space-between; font-weight:800; font-size:1rem; padding:8px 10px; margin-top:6px; border-radius:6px; }
+.z-diff.ok{ background:#e6eedd; color: var(--hop); }
+.z-diff.bad{ background: var(--danger-bg); color: var(--danger); }
+.z-diff.over{ background:#fbf0d9; color:#8a5a0f; }
+.z-sign{ margin-top:22px; font-size:0.8rem; }
+
+.sh-badge{ font-size:0.8rem !important; background: var(--surface-alt); color: var(--ink-soft); }
+.sh-badge.open{ background:#e6eedd; color: var(--hop); }
+
+/* ================= СОТРУДНИКИ ================= */
+.emp-avatar{ width:52px; height:52px; border-radius:50%; flex-shrink:0; display:flex; align-items:center; justify-content:center; font-family:'Oswald',sans-serif; font-size:1.4rem; color:#fff; background: var(--hop); }
+.emp-avatar.admin{ background: var(--amber); }
+.emp-row .pl-name .badge{ margin-left:6px; vertical-align:middle; }
+.emp-row.off{ opacity:0.6; }
+.emp-row.off .emp-avatar{ background:#b9ad99; }
+.emp-short{ color: var(--danger); font-weight:600; }
+.pl-stock.idle{ background: var(--surface-alt); color: var(--ink-soft); font-weight:600; }
+.pe-seg button.active.off{ color: var(--danger); }
+.sheet-body input:disabled{ opacity:0.6; }
+
+@media (max-width: 880px){
+  .shift-gate{ min-height:60vh; }
+  .sh-modal .pay2-body.sh-panel{ grid-template-columns:1fr; }
+}
+@media (max-width: 640px){
+  .pos2-shift-btn{ height:40px; padding:0 10px; }
+  .sh-act{ min-height:64px; font-size:1rem; }
+  .sh-tile b{ font-size:1.05rem; }
+  .emp-avatar{ width:44px; height:44px; font-size:1.2rem; }
+}
+.shift-gate-check{ min-height:52px; width:100%; font-size:1rem; }

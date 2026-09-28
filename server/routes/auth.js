@@ -17,6 +17,9 @@ router.post('/login', async (req, res) => {
     if (!user || !(await bcrypt.compare(password, user.password_hash))) {
       return res.status(401).json({ error: 'Неверный логин или пароль' });
     }
+    if (user.is_active === false) {
+      return res.status(403).json({ error: 'Учётная запись отключена. Обратитесь к администратору' });
+    }
     const payload = { id: user.id, username: user.username, name: user.name, role: user.role };
     const token = jwt.sign(payload, process.env.JWT_SECRET, { expiresIn: '12h' });
     res.json({ token, user: payload });

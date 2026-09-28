@@ -195,6 +195,52 @@ ALTER TABLE supplier_return_items ADD COLUMN IF NOT EXISTS subtotal NUMERIC(12,2
 ALTER TABLE supplier_return_items ADD COLUMN IF NOT EXISTS reason VARCHAR(30) NOT NULL DEFAULT 'expired';
 CREATE INDEX IF NOT EXISTS idx_supplier_return_items_return ON supplier_return_items(supplier_return_id);
 
+-- ================= СОТРУДНИКИ И СМЕНЫ =================
+ALTER TABLE users ADD COLUMN IF NOT EXISTS phone VARCHAR(50);
+ALTER TABLE users ADD COLUMN IF NOT EXISTS is_active BOOLEAN NOT NULL DEFAULT true;
+
+-- Кассовая смена: открывается с суммой в кассе, закрывается пересчётом наличных (Z-отчёт)
+CREATE TABLE IF NOT EXISTS shifts (
+  id SERIAL PRIMARY KEY,
+  user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  user_name VARCHAR(100) NOT NULL,
+  opened_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  closed_at TIMESTAMPTZ,
+  opening_cash NUMERIC(12,2) NOT NULL DEFAULT 0,
+  -- итоги, фиксируются при закрытии
+  receipts_count INTEGER,
+  total_sales NUMERIC(12,2),
+  cash_sales NUMERIC(12,2),
+  qr_sales NUMERIC(12,2),
+  cash_in NUMERIC(12,2),
+  cash_out NUMERIC(12,2),
+  expected_cash NUMERIC(12,2),
+  counted_cash NUMERIC(12,2),
+  difference NUMERIC(12,2),
+  close_note TEXT
+);
+ALTER TABLE shifts ADD COLUMN IF NOT EXISTS closed_by VARCHAR(100);
+-- Смена общая на магазин (одна открытая), это проверяется в коде при открытии.
+-- Раньше смена была у каждого сотрудника своя — старый индекс убираем.
+DROP INDEX IF EXISTS idx_shifts_one_open;
+CREATE INDEX IF NOT EXISTS idx_shifts_open ON shifts(opened_at DESC) WHERE closed_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_shifts_opened_at ON shifts(opened_at DESC);
+
+-- Внесения и изъятия наличных в течение смены (размен, инкассация, расходы)
+CREATE TABLE IF NOT EXISTS cash_movements (
+  id SERIAL PRIMARY KEY,
+  shift_id INTEGER NOT NULL REFERENCES shifts(id) ON DELETE CASCADE,
+  type VARCHAR(3) NOT NULL CHECK (type IN ('in', 'out')),
+  amount NUMERIC(12,2) NOT NULL CHECK (amount > 0),
+  reason VARCHAR(200),
+  user_name VARCHAR(100),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_cash_movements_shift ON cash_movements(shift_id);
+
+ALTER TABLE receipts ADD COLUMN IF NOT EXISTS shift_id INTEGER REFERENCES shifts(id) ON DELETE SET NULL;
+CREATE INDEX IF NOT EXISTS idx_receipts_shift ON receipts(shift_id);
+
 -- Старые версии таблиц склада могли содержать свои обязательные колонки,
 -- которые новый код не заполняет, — снимаем с них NOT NULL, чтобы приход проводился.
 DO $$

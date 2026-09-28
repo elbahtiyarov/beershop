@@ -49,7 +49,14 @@ router.post('/', async (req, res) => {
   const method = validMethods.includes(payment_method) ? payment_method : 'cash';
 
   const client = await pool.connect();
-  const outOfStockAlerts = []; // товары, у которых остаток обнулился именно этой продажей
+  const outOfStockAlerts = [];
+  // Продавать можно только в открытой смене магазина (её открывает администратор)
+  const shiftRes = await client.query('SELECT id FROM shifts WHERE closed_at IS NULL ORDER BY opened_at DESC LIMIT 1');
+  if (!shiftRes.rows[0]) {
+    client.release();
+    return res.status(409).json({ error: 'Смена не открыта. Попросите администратора открыть смену', code: 'NO_SHIFT' });
+  }
+  const shiftId = shiftRes.rows[0].id; // товары, у которых остаток обнулился именно этой продажей
   try {
     await client.query('BEGIN');
 
@@ -108,8 +115,8 @@ router.post('/', async (req, res) => {
     }
 
     const receiptResult = await client.query(
-      'INSERT INTO receipts (cashier_id, cashier_name, total, payment_method, cash_amount, qr_amount, received_amount) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *',
-      [req.user.id, req.user.name, total, method, cashAmount, qrAmount, receivedAmount]
+      'INSERT INTO receipts (cashier_id, cashier_name, total, payment_method, cash_amount, qr_amount, received_amount, shift_id) VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *',
+      [req.user.id, req.user.name, total, method, cashAmount, qrAmount, receivedAmount, shiftId]
     );
     const receipt = receiptResult.rows[0];
 

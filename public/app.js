@@ -35,6 +35,11 @@ let state = {
   toast: null,
   userFormError: '',
   scanFlash: '', // '', 'ok', 'error'
+  shift: null,          // текущая открытая смена (X-отчёт) или null
+  shiftModal: null,     // окно смены: open | panel | in | out | close | report
+  shiftsList: [],
+  shiftsFilterUser: 'all',
+  userSheet: null,      // окно сотрудника
   productEditId: null, // открытое окно товара
   productDraft: null,
   productsLowOnly: false,
@@ -112,6 +117,9 @@ function logout(message) {
   state.receiptToShow = null;
   state.view = 'pos';
   state.mobileMenuOpen = false;
+  state.shift = null;
+  state.shiftModal = null;
+  state.userSheet = null;
   localStorage.removeItem('beershop_token');
   localStorage.removeItem('beershop_user');
   render();
@@ -123,12 +131,14 @@ async function loadAll() {
   state.loading = true;
   render();
   try {
-    const [products, receipts] = await Promise.all([
+    const [products, receipts, shift] = await Promise.all([
       api('/products'),
       api('/receipts'),
+      api('/shifts/current'),
     ]);
     state.products = products;
     state.receipts = receipts;
+    state.shift = shift;
   } catch (err) {
     if (err.message !== 'unauthorized') showToast('Не удалось загрузить данные: ' + err.message);
   }
@@ -196,7 +206,7 @@ function flashScan(kind) {
   setTimeout(() => { state.scanFlash = ''; render(); focusScanInput(); }, 450);
 }
 function focusScanInput() {
-  if (Scanner.open) return; // камера открыта — не вызываем клавиатуру на телефоне
+  if (Scanner.open || state.shiftModal) return; // камера или окно смены открыты — фокус не забираем
   const el = document.getElementById('scan-input');
   if (el) el.focus();
 }
@@ -248,6 +258,11 @@ async function checkout(paymentDetails) {
     render();
   } catch (err) {
     showToast(err.message || 'Не удалось оформить чек');
+    if (/Смена не открыта/.test(err.message || '')) {
+      state.showPaymentModal = false;
+      await loadCurrentShift();
+      render();
+    }
   }
 }
 function closeReceiptModal() { state.receiptToShow = null; state.justPaid = null; render(); focusScanInput(); }
@@ -561,6 +576,8 @@ async function setView(v) {
   if (v === 'products' && state.currentUser.role === 'admin') await loadCategoryMarkups();
   if (v === 'analytics' && state.currentUser.role === 'admin') await loadAnalytics(state.analyticsPeriodDays);
   if (v === 'stock') await loadStockData();
+  if (v === 'shifts' && state.currentUser.role === 'admin') await loadShiftsList();
+  if (v === 'pos') await loadCurrentShift();
   render();
   if (v === 'pos') focusScanInput();
 }
@@ -620,7 +637,8 @@ function navItems() {
   items.push({ id: 'history', label: 'История чеков' });
   if (role === 'admin') items.push({ id: 'analytics', label: 'Показатели' });
   if (role === 'admin') items.push({ id: 'trash', label: 'Корзина' });
-  if (role === 'admin') items.push({ id: 'users', label: 'Пользователи' });
+  if (role === 'admin') items.push({ id: 'shifts', label: 'Смены' });
+  if (role === 'admin') items.push({ id: 'users', label: 'Сотрудники' });
   return items;
 }
 function renderSidebar() {
@@ -658,6 +676,7 @@ const ICONS = {
   history: '<path d="M6 3h12v18l-3-2-3 2-3-2-3 2z"/><path d="M9 8h6M9 12h6"/>',
   analytics: '<path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/>',
   trash: '<path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"/>',
+  shifts: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
   users: '<circle cx="9" cy="8" r="3.5"/><path d="M2.5 20a6.5 6.5 0 0 1 13 0"/><path d="M16 4.5a3.5 3.5 0 0 1 0 7M18 14a6.5 6.5 0 0 1 3.5 6"/>',
   logout: '<path d="M15 4h3a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-3"/><path d="M10 16l-4-4 4-4M6 12h10"/>',
   search: '<circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/>',
@@ -673,6 +692,7 @@ function icon(name, size = 22) {
 }
 
 function renderPOS() {
+  if (!state.shift) return renderShiftGate();
   const categories = [...new Set(state.products.map(p => p.category).filter(Boolean))].sort();
   const search = state.posSearch.trim().toLowerCase();
   const filtered = state.products.filter(p => {
@@ -755,9 +775,12 @@ function renderPOS() {
       <div class="pos2-check-head">
         <div>
           <div class="pos2-check-title">${icon('cart', 20)} Чек</div>
-          <div class="pos2-check-meta">${esc(state.currentUser.name)} · ${new Date().toLocaleDateString('ru-RU')}</div>
+          <div class="pos2-check-meta">${esc(state.currentUser.name)} · смена №${state.shift.id} с ${fmtTime(state.shift.opened_at)}</div>
         </div>
-        <button class="pos2-clear" ${empty ? 'disabled' : ''} onclick="clearCart()">${icon('trash', 18)} Очистить</button>
+        <div class="pos2-head-btns">
+          ${state.currentUser.role === 'admin' ? `<button class="pos2-shift-btn" onclick="openShiftPanel()" title="Смена: X-отчёт, внесение, изъятие, закрытие">${icon('shifts', 18)} Смена</button>` : ''}
+          <button class="pos2-clear" ${empty ? 'disabled' : ''} onclick="clearCart()" title="Очистить чек">${icon('trash', 18)}</button>
+        </div>
       </div>
       <div class="pos2-lines" id="pos2-lines">
         ${empty ? `
@@ -780,7 +803,8 @@ function renderPOS() {
       </div>
     </aside>
   </div>
-  ${state.showPaymentModal ? renderPaymentModal() : ''}`;
+  ${state.showPaymentModal ? renderPaymentModal() : ''}
+  ${state.shiftModal ? renderShiftModal() : ''}`;
 }
 
 /* ============ ОПЛАТА (экранная клавиатура, быстрые купюры, сдача) ============ */
@@ -992,6 +1016,22 @@ function renderPaymentModal() {
 document.addEventListener('keydown', (e) => {
   if (!state.currentUser) return;
   if (Scanner.open) { if (e.key === 'Escape') closeCameraScanner(); return; }
+  if (state.shiftModal) {
+    const mode = state.shiftModal.mode;
+    // Печатаем в поле комментария — цифры и Enter не перехватываем
+    const typing = !!(e.target && e.target.classList && e.target.classList.contains('sh-note'));
+    if (!typing && e.target && e.target.tagName === 'INPUT' && e.target.blur) e.target.blur();
+    if (!typing && ['open', 'in', 'out', 'close'].includes(mode)) {
+      if (/^[0-9]$/.test(e.key)) { e.preventDefault(); shiftNumpad(e.key); return; }
+      if (e.key === 'Backspace') { e.preventDefault(); shiftNumpad('back'); return; }
+      if (e.key === '.' || e.key === ',') { e.preventDefault(); shiftNumpad('.'); return; }
+    }
+    if (e.key === 'Enter' && !typing) {
+      e.preventDefault();
+      if (mode === 'report') closeShiftModal(); else confirmShiftModal();
+    } else if (e.key === 'Escape') { e.preventDefault(); closeShiftModal(); }
+    return;
+  }
   if (state.showPaymentModal) {
     if (/^[0-9]$/.test(e.key)) { e.preventDefault(); numpadPress(e.key); }
     else if (e.key === 'Backspace') { e.preventDefault(); numpadPress('back'); }
@@ -1543,42 +1583,476 @@ function renderTrash() {
   </div>`;
 }
 
-/* ============ RENDER: USERS (admin only) ============ */
-function renderUsers() {
-  const rows = allUsers.map(u => `
-    <tr>
-      <td><input type="text" value="${esc(u.name)}" onchange="updateUserField(${u.id},'name', this.value)"></td>
-      <td class="mono">${esc(u.username)}</td>
-      <td>
-        <select onchange="updateUserField(${u.id},'role', this.value)">
-          <option value="cashier" ${u.role === 'cashier' ? 'selected' : ''}>Кассир</option>
-          <option value="admin" ${u.role === 'admin' ? 'selected' : ''}>Админ</option>
-        </select>
-      </td>
-      <td><input type="text" placeholder="Новый пароль" onchange="if(this.value) updateUserField(${u.id},'password', this.value)"></td>
-      <td><button class="btn btn-danger btn-sm" onclick="deleteUser(${u.id})">Удалить</button></td>
-    </tr>`).join('');
+/* ============ КАССОВАЯ СМЕНА ============ */
+const CASH_IN_REASONS = ['Размен', 'Возврат с инкассации', 'Другое'];
+const CASH_OUT_REASONS = ['Инкассация', 'Расходы магазина', 'Оплата поставщику', 'Другое'];
+function fmtTime(iso) { return new Date(iso).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' }); }
+
+async function loadCurrentShift() {
+  try { state.shift = await api('/shifts/current'); } catch (err) { if (err.message !== 'unauthorized') showToast(err.message); }
+}
+function openShiftModal(mode, extra = {}) {
+  state.shiftModal = { mode, value: '', reason: '', note: '', ...extra };
+  render();
+}
+function closeShiftModal() {
+  state.shiftModal = null;
+  render();
+  focusScanInput();
+}
+async function openShiftPanel() {
+  await loadCurrentShift();
+  if (!state.shift) { render(); return; }
+  openShiftModal('panel');
+}
+function shiftNumpad(key) {
+  const m = state.shiftModal;
+  if (!m || !['open', 'in', 'out', 'close'].includes(m.mode)) return;
+  let v = String(m.value || '');
+  if (key === 'back') v = v.slice(0, -1);
+  else if (key === 'clear') v = '';
+  else if (key === '.') { if (!v.includes('.')) v = (v || '0') + '.'; }
+  else {
+    if (v === '0') v = '';
+    if (v.includes('.') && v.split('.')[1].length >= 2) return;
+    if (v.replace('.', '').length >= 9) return;
+    v += key;
+  }
+  m.value = v;
+  render();
+}
+function setShiftModalField(field, value, rerender) {
+  if (!state.shiftModal) return;
+  state.shiftModal[field] = value;
+  if (rerender) render();
+}
+function shiftModalCanConfirm() {
+  const m = state.shiftModal;
+  if (!m) return false;
+  if (m.mode === 'open' || m.mode === 'close') return m.value !== '';
+  if (m.mode === 'in' || m.mode === 'out') return Number(m.value) > 0 && !!m.reason;
+  return false;
+}
+async function confirmShiftModal() {
+  const m = state.shiftModal;
+  if (!m || !shiftModalCanConfirm()) return;
+  try {
+    if (m.mode === 'open') {
+      state.shift = await api('/shifts/open', { method: 'POST', body: { opening_cash: Number(m.value) || 0 } });
+      state.shiftModal = null;
+      render();
+      showToast('Смена №' + state.shift.id + ' открыта. Хороших продаж!');
+      focusScanInput();
+    } else if (m.mode === 'in' || m.mode === 'out') {
+      state.shift = await api('/shifts/current/cash', { method: 'POST', body: { type: m.mode, amount: Number(m.value), reason: m.reason } });
+      showToast((m.mode === 'in' ? 'Внесено ' : 'Изъято ') + fmt(Number(m.value)));
+      openShiftModal('panel');
+    } else if (m.mode === 'close') {
+      const body = { counted_cash: Number(m.value) || 0, note: m.note };
+      const own = !m.target || (state.shift && m.target.id === state.shift.id);
+      const report = own
+        ? await api('/shifts/current/close', { method: 'POST', body })
+        : await api('/shifts/' + m.target.id + '/close', { method: 'POST', body });
+      if (state.shift && report.id === state.shift.id) { state.shift = null; state.cart = []; }
+      if (state.view === 'shifts') await loadShiftsList();
+      openShiftModal('report', { report });
+      showToast('Смена №' + report.id + ' закрыта');
+    }
+  } catch (err) { showToast(err.message); }
+}
+// Закрыть смену из отчёта: берём свежие итоги и открываем пересчёт кассы
+async function startCloseShift(id) {
+  try {
+    const target = await api('/shifts/' + id);
+    if (!target.is_open) { showToast('Смена уже закрыта'); openShiftModal('report', { report: target }); return; }
+    openShiftModal('close', { target });
+  } catch (err) { showToast(err.message); }
+}
+async function openShiftReport(id) {
+  try { openShiftModal('report', { report: await api('/shifts/' + id) }); } catch (err) { showToast(err.message); }
+}
+
+function numpadHtml(fn) {
+  const keys = ['7', '8', '9', '4', '5', '6', '1', '2', '3', '00', '0', 'back'];
+  return `
+    <div class="pay2-numpad">
+      ${keys.map(k => `<button onclick="${fn}('${k}')" ${k === 'back' ? 'class="key-back" aria-label="Стереть"' : ''}>${k === 'back' ? icon('back', 26) : k}</button>`).join('')}
+      <button class="key-clear" onclick="${fn}('clear')">Сброс</button>
+    </div>`;
+}
+function moneyDisplay(v) {
+  return v === '' ? '<span class="ph">0</span>' : Number(v).toLocaleString('ru-RU', { maximumFractionDigits: 2 }) + (String(v).endsWith('.') ? ',' : '');
+}
+
+// Экран вместо кассы, пока смена не открыта
+function renderShiftGate() {
+  const isAdmin = state.currentUser.role === 'admin';
+  if (!isAdmin) scheduleShiftCheck();
+  return `
+  <div class="shift-gate">
+    <div class="shift-gate-card">
+      <div class="shift-gate-ico">${icon('cash', 40)}</div>
+      <h2>Смена закрыта</h2>
+      ${isAdmin ? `
+      <p>Откройте смену магазина и укажите, сколько наличных сейчас в кассе. После этого кассиры смогут продавать.</p>
+      <button class="pos2-pay shift-gate-btn" onclick="openShiftModal('open')">Открыть смену</button>` : `
+      <p>Продажи пока недоступны. Попросите администратора открыть смену — касса включится автоматически.</p>
+      <button class="btn btn-ghost shift-gate-check" onclick="checkShiftNow()">Проверить ещё раз</button>`}
+      <div class="shift-gate-user">${esc(state.currentUser.name)} · ${new Date().toLocaleDateString('ru-RU')}</div>
+    </div>
+  </div>
+  ${state.shiftModal ? renderShiftModal() : ''}`;
+}
+// Кассир ждёт открытия смены: проверяем раз в 15 секунд, пока открыт экран кассы
+let shiftCheckTimer = null;
+function scheduleShiftCheck() {
+  if (shiftCheckTimer) return;
+  shiftCheckTimer = setTimeout(async () => {
+    shiftCheckTimer = null;
+    if (!state.currentUser || state.view !== 'pos' || state.shift) return;
+    await loadCurrentShift();
+    if (state.shift) { render(); showToast('Смена открыта — можно продавать'); } else if (state.view === 'pos') render();
+  }, 15000);
+}
+async function checkShiftNow() {
+  await loadCurrentShift();
+  render();
+  if (!state.shift) showToast('Смена ещё не открыта');
+}
+
+function shiftStatRows(r) {
+  const row = (label, value, cls = '') => `<div class="sh-row ${cls}"><span>${label}</span><b>${value}</b></div>`;
+  return `
+    <div class="sh-grid">
+      <div class="sh-tile"><span>Чеков</span><b>${r.receipts_count}</b></div>
+      <div class="sh-tile"><span>Выручка</span><b>${fmt(r.total_sales)}</b></div>
+      <div class="sh-tile"><span>Наличными</span><b>${fmt(r.cash_sales)}</b></div>
+      <div class="sh-tile"><span>По QR</span><b>${fmt(r.qr_sales)}</b></div>
+    </div>
+    <div class="sh-cash">
+      ${row('Наличные на начало', fmt(r.opening_cash))}
+      ${row('+ продажи наличными', fmt(r.cash_sales))}
+      ${row('+ внесения', fmt(r.cash_in))}
+      ${row('− изъятия', fmt(r.cash_out))}
+      ${row('Должно быть в кассе', fmt(r.expected_cash), 'total')}
+    </div>`;
+}
+
+function renderShiftModal() {
+  const m = state.shiftModal;
+  if (!m) return '';
+  const sh = m.mode === 'close' && m.target ? m.target : state.shift;
+  const otherCashier = m.mode === 'close' && m.target && m.target.user_id !== state.currentUser.id;
+  let title = '', body = '', actions = '';
+
+  if (m.mode === 'open') {
+    title = 'Открытие смены';
+    body = `
+      <div class="pay2-body">
+        <div class="pay2-left">
+          <div class="pay2-field active"><label>Наличные в кассе на начало смены</label>
+            <div class="pay2-display">${moneyDisplay(m.value)}<span class="cur">₸</span></div></div>
+          <div class="pay2-quick"><button class="exact" onclick="setShiftModalField('value', '0', true)">Касса пустая (0 ₸)</button></div>
+          <div class="sh-hint">Пересчитайте размен в ящике и введите сумму. В конце смены система сравнит её с фактом.</div>
+        </div>
+        <div class="pay2-right">${numpadHtml('shiftNumpad')}</div>
+      </div>`;
+    actions = `<button class="pay2-cancel" onclick="closeShiftModal()">Отмена</button>
+      <button class="pay2-confirm" ${shiftModalCanConfirm() ? '' : 'disabled'} onclick="confirmShiftModal()">${icon('check', 24)} Открыть смену</button>`;
+  } else if (m.mode === 'panel' && sh) {
+    title = `Смена №${sh.id} · с ${fmtTime(sh.opened_at)}`;
+    const moves = (sh.movements || []).map(mv => `
+      <div class="sh-move ${mv.type}"><span>${fmtTime(mv.created_at)} · ${esc(mv.reason || '')}</span><b>${mv.type === 'in' ? '+' : '−'}${fmt(mv.amount)}</b></div>`).join('');
+    body = `
+      <div class="pay2-body sh-panel">
+        <div class="pay2-left">
+          <div class="sh-caption">X-отчёт — текущие итоги смены</div>
+          ${shiftStatRows(sh)}
+          ${(sh.by_cashier || []).length ? `<div class="sh-caption" style="margin-top:6px;">Продажи по кассирам</div><div class="sh-moves">${sh.by_cashier.map(c => `<div class="sh-move"><span>${esc(c.cashier_name)} · ${c.receipts_count} чек.</span><b>${fmt(c.total)}</b></div>`).join('')}</div>` : ''}
+          ${moves ? `<div class="sh-caption" style="margin-top:6px;">Внесения и изъятия</div><div class="sh-moves">${moves}</div>` : ''}
+        </div>
+        <div class="pay2-right sh-actions">
+          <button class="sh-act in" onclick="openShiftModal('in')">${icon('cash', 26)}<span>Внесение<small>размен в кассу</small></span></button>
+          <button class="sh-act out" onclick="openShiftModal('out')">${icon('logout', 26)}<span>Изъятие<small>инкассация, расходы</small></span></button>
+          <button class="sh-act close" onclick="openShiftModal('close')">${icon('check', 26)}<span>Закрыть смену<small>пересчёт и Z-отчёт</small></span></button>
+        </div>
+      </div>`;
+    actions = `<button class="pay2-cancel" style="grid-column:1/-1;" onclick="closeShiftModal()">Вернуться к кассе <kbd>Esc</kbd></button>`;
+  } else if (m.mode === 'in' || m.mode === 'out') {
+    const isIn = m.mode === 'in';
+    title = isIn ? 'Внесение наличных' : 'Изъятие наличных';
+    const reasons = isIn ? CASH_IN_REASONS : CASH_OUT_REASONS;
+    body = `
+      <div class="pay2-body">
+        <div class="pay2-left">
+          <div class="pay2-field active"><label>Сумма</label>
+            <div class="pay2-display">${moneyDisplay(m.value)}<span class="cur">₸</span></div></div>
+          <div class="sh-caption">Причина</div>
+          <div class="sh-reasons">${reasons.map(r => `<button class="${m.reason === r ? 'active' : ''}" onclick="setShiftModalField('reason', '${r}', true)">${r}</button>`).join('')}</div>
+          ${!isIn && sh ? `<div class="sh-hint">В кассе по расчёту: <b>${fmt(sh.expected_cash)}</b></div>` : ''}
+        </div>
+        <div class="pay2-right">${numpadHtml('shiftNumpad')}</div>
+      </div>`;
+    actions = `<button class="pay2-cancel" onclick="openShiftModal('panel')">Назад</button>
+      <button class="pay2-confirm" ${shiftModalCanConfirm() ? '' : 'disabled'} onclick="confirmShiftModal()">${icon('check', 24)} ${isIn ? 'Внести' : 'Изъять'}</button>`;
+  } else if (m.mode === 'close' && sh) {
+    title = `Закрытие смены №${sh.id}` + (otherCashier ? ` · ${sh.user_name}` : '');
+    const counted = Number(m.value) || 0;
+    const diff = +(counted - Number(sh.expected_cash)).toFixed(2);
+    const box = m.value === ''
+      ? `<div class="pay2-change neutral"><span>Расхождение</span><b>—</b><small>Пересчитайте наличные в ящике и введите сумму</small></div>`
+      : Math.abs(diff) < 0.01 ? `<div class="pay2-change ok"><span>Касса сошлась</span><b>0 ₸</b></div>`
+      : diff < 0 ? `<div class="pay2-change bad"><span>Недостача</span><b>${fmt(-diff)}</b></div>`
+      : `<div class="pay2-change over"><span>Излишек</span><b>${fmt(diff)}</b></div>`;
+    body = `
+      <div class="pay2-body">
+        <div class="pay2-left">
+          <div class="sh-row total big"><span>Должно быть в кассе</span><b>${fmt(sh.expected_cash)}</b></div>
+          <div class="pay2-field active"><label>Фактически в кассе (пересчитали)</label>
+            <div class="pay2-display">${moneyDisplay(m.value)}<span class="cur">₸</span></div></div>
+          ${box}
+          ${m.value !== '' && Math.abs(diff) >= 0.01 ? `<input class="sh-note" type="text" placeholder="Комментарий к расхождению (необязательно)" value="${esc(m.note)}" oninput="setShiftModalField('note', this.value)">` : ''}
+        </div>
+        <div class="pay2-right">${numpadHtml('shiftNumpad')}</div>
+      </div>`;
+    actions = `<button class="pay2-cancel" onclick="${m.target ? `openShiftReport(${sh.id})` : `openShiftModal('panel')`}">Назад</button>
+      <button class="pay2-confirm sh-close-btn" ${shiftModalCanConfirm() ? '' : 'disabled'} onclick="confirmShiftModal()">${icon('check', 24)} Закрыть смену</button>`;
+  } else if (m.mode === 'report' && m.report) {
+    return renderShiftReportModal(m.report);
+  } else {
+    return '';
+  }
 
   return `
-  <div class="page-head">
-    <div><h2>Пользователи</h2><div class="page-sub">Доступ для администраторов и кассиров</div></div>
-  </div>
-  <div class="panel">
-    <table>
-      <thead><tr><th>Имя</th><th>Логин</th><th>Роль</th><th>Пароль</th><th></th></tr></thead>
-      <tbody>${rows}</tbody>
-    </table>
-    <div class="add-form">
-      <div class="field"><label>Имя</label><input id="new-u-name" type="text" placeholder="Айгуль"></div>
-      <div class="field"><label>Логин</label><input id="new-u-username" type="text" placeholder="aigul"></div>
-      <div class="field"><label>Пароль</label><input id="new-u-password" type="text" placeholder="••••••"></div>
-      <div class="field">
-        <label>Роль</label>
-        <select id="new-u-role"><option value="cashier">Кассир</option><option value="admin">Админ</option></select>
+  <div class="modal-overlay pay2-overlay" onclick="if(event.target===this) closeShiftModal()">
+    <div class="pay2 sh-modal" role="dialog" aria-label="${esc(title)}">
+      <div class="pay2-head">
+        <div><div class="pay2-head-label">Касса · ${esc(state.currentUser.name)}</div><div class="sh-head-title">${esc(title)}</div></div>
+        <button class="pay2-close" onclick="closeShiftModal()" aria-label="Закрыть">×</button>
       </div>
-      <button class="btn btn-hop" onclick="addUser()">Добавить</button>
+      ${body}
+      <div class="pay2-actions">${actions}</div>
     </div>
-    ${state.userFormError ? `<div class="login-error" style="margin-top:12px;">${esc(state.userFormError)}</div>` : ''}
+  </div>`;
+}
+
+function renderShiftReportModal(r) {
+  const d = Number(r.difference);
+  const line = (label, value, cls = '') => `<div class="receipt-line ${cls}"><span>${label}</span><span class="qp">${value}</span></div>`;
+  const moves = (r.movements || []).map(mv => line(`${fmtTime(mv.created_at)} ${mv.type === 'in' ? 'внесение' : 'изъятие'}${mv.reason ? ' · ' + esc(mv.reason) : ''}`, (mv.type === 'in' ? '+' : '−') + fmt(mv.amount))).join('');
+  const isMine = state.view === 'pos';
+  const canClose = r.is_open && (state.currentUser.role === 'admin' || r.user_id === state.currentUser.id);
+  return `
+  <div class="modal-overlay" onclick="if(event.target===this) closeShiftModal()">
+    <div class="modal-card">
+      <div class="modal-close-row"><button class="icon-btn" onclick="closeShiftModal()" aria-label="Закрыть">×</button></div>
+      <div class="receipt">
+        <div class="receipt-head">
+          <div class="shop">Хмель</div>
+          <div class="z-title">${r.is_open ? 'X-отчёт (смена открыта)' : 'Z-отчёт · смена закрыта'}</div>
+          <div class="meta">Смена №${r.id} · открыл ${esc(r.user_name)}<br>
+            Открыта: ${fmtDate(r.opened_at)}${r.closed_at ? '<br>Закрыта: ' + fmtDate(r.closed_at) : ''}${r.closed_by && r.closed_by !== r.user_name ? '<br>Закрыл: ' + esc(r.closed_by) : ''}</div>
+        </div>
+        ${line('Чеков', `${r.receipts_count}`)}
+        ${line('&nbsp;&nbsp;наличные / QR / смеш.', `${r.cash_count ?? '—'} / ${r.qr_count ?? '—'} / ${r.mixed_count ?? '—'}`)}
+        <div class="receipt-total"><span>Выручка</span><span>${fmt(r.total_sales)}</span></div>
+        ${line('&nbsp;&nbsp;наличными', fmt(r.cash_sales))}
+        ${line('&nbsp;&nbsp;по QR', fmt(r.qr_sales))}
+        <div class="z-sep"></div>
+        ${line('Наличные на начало', fmt(r.opening_cash))}
+        ${line('+ продажи наличными', fmt(r.cash_sales))}
+        ${line('+ внесения', fmt(r.cash_in))}
+        ${line('− изъятия', fmt(r.cash_out))}
+        <div class="receipt-total"><span>Ожидалось в кассе</span><span>${fmt(r.expected_cash)}</span></div>
+        ${r.is_open ? '' : `
+        ${line('Фактически в кассе', fmt(r.counted_cash))}
+        <div class="z-diff ${Math.abs(d) < 0.01 ? 'ok' : d < 0 ? 'bad' : 'over'}"><span>${Math.abs(d) < 0.01 ? 'Касса сошлась' : d < 0 ? 'Недостача' : 'Излишек'}</span><span>${fmt(Math.abs(d))}</span></div>
+        ${r.close_note ? `<div class="receipt-line"><span>Комментарий: ${esc(r.close_note)}</span></div>` : ''}`}
+        ${(r.by_cashier || []).length ? `<div class="z-sep"></div><div class="receipt-line"><span>Продажи по кассирам:</span></div>
+        ${r.by_cashier.map(c => line(`&nbsp;&nbsp;${esc(c.cashier_name)} (${c.receipts_count} чек.)`, fmt(c.total))).join('')}` : ''}
+        ${moves ? `<div class="z-sep"></div><div class="receipt-line"><span>Движение наличных:</span></div>${moves}` : ''}
+        <div class="z-sign">Подпись ответственного ____________</div>
+      </div>
+      <div class="receipt-actions">
+        <button class="btn btn-ghost" style="flex:1;" onclick="window.print()">Печать</button>
+        ${canClose ? `<button class="btn btn-primary z-close-shift" style="flex:1.6;" onclick="startCloseShift(${r.id})">${icon('check', 18)} Закрыть смену</button>` : ''}
+        <button class="btn ${canClose ? 'btn-ghost' : 'btn-primary'}" style="flex:1;" onclick="closeShiftModal()">${isMine && !r.is_open ? 'Готово' : 'Назад'}</button>
+      </div>
+    </div>
+  </div>`;
+}
+
+/* ============ АДМИН: СПИСОК СМЕН ============ */
+async function loadShiftsList() {
+  try {
+    const q = state.shiftsFilterUser !== 'all' ? '?user_id=' + state.shiftsFilterUser : '';
+    state.shiftsList = await api('/shifts' + q);
+    if (!allUsers.length) await loadUsers();
+  } catch (err) { showToast(err.message); }
+}
+async function setShiftsFilterUser(id) {
+  state.shiftsFilterUser = id;
+  await loadShiftsList();
+  render();
+}
+function renderShifts() {
+  const list = state.shiftsList || [];
+  const openCount = list.filter(s => s.is_open).length;
+  const closed = list.filter(s => !s.is_open);
+  const shortSum = closed.filter(s => Number(s.difference) < -0.009).reduce((a, s) => a + Number(s.difference), 0);
+  const chips = [['all', 'Все']].concat(allUsers.map(u => [String(u.id), u.name]))
+    .map(([id, label]) => `<button class="pos2-chip ${String(state.shiftsFilterUser) === id ? 'active' : ''}" onclick="setShiftsFilterUser('${id}')">${esc(label)}</button>`).join('');
+  const rows = list.map(s => {
+    const d = Number(s.difference);
+    const badge = s.is_open ? '<span class="pl-stock ok">идёт</span>'
+      : Math.abs(d) < 0.01 ? '<span class="pl-stock ok">сошлась</span>'
+      : d < 0 ? `<span class="pl-stock out">недостача ${fmt(-d)}</span>` : `<span class="pl-stock low">излишек ${fmt(d)}</span>`;
+    return `
+    <button class="pl-row doc-row ${s.is_open ? 'doc-in' : ''}" onclick="openShiftReport(${s.id})">
+      <div class="doc-badge sh-badge ${s.is_open ? 'open' : ''}">${s.is_open ? icon('cash', 22) : '№' + s.id}</div>
+      <div class="pl-main">
+        <div class="pl-name">Смена №${s.id} · открыл ${esc(s.user_name)}</div>
+        <div class="pl-sub"><span>${fmtDate(s.opened_at)}${s.closed_at ? ' — ' + fmtTime(s.closed_at) : ' — сейчас'}</span></div>
+        <div class="pl-cost">${s.receipts_count} чек. · нал. ${fmt(s.cash_sales)} · QR ${fmt(s.qr_sales)}</div>
+      </div>
+      <div class="pl-right">
+        <div class="pl-price">${fmt(s.total_sales)}</div>
+        ${badge}
+      </div>
+      <span class="pl-chev" aria-hidden="true">›</span>
+    </button>`;
+  }).join('');
+  return `
+  <div class="page-head"><div><h2>Смены</h2><div class="page-sub">Открытие и закрытие касс, выручка и расхождения по сменам</div></div></div>
+  <div class="pl-stats">
+    <div class="pl-stat"><span>Сейчас на смене</span><b>${openCount}</b></div>
+    <div class="pl-stat"><span>Смен в списке</span><b>${list.length}</b></div>
+    <div class="pl-stat ${shortSum < 0 ? 'alert' : ''}"><span>Недостачи</span><b>${fmt(-shortSum)}</b></div>
+  </div>
+  <div class="pos2-chips" style="margin-bottom:12px;">${chips}</div>
+  <div class="pl-list doc-list">${rows}</div>
+  ${list.length === 0 ? '<div class="panel"><div class="empty-state">Смен пока нет.</div></div>' : ''}
+  ${state.shiftModal ? renderShiftModal() : ''}`;
+}
+
+/* ============ АДМИН: СОТРУДНИКИ ============ */
+function openUserSheet(id) {
+  const u = id ? allUsers.find(x => x.id === id) : null;
+  state.userSheet = {
+    id: u ? u.id : null,
+    name: u ? u.name : '', username: u ? u.username : '', phone: u ? (u.phone || '') : '',
+    role: u ? u.role : 'cashier', is_active: u ? u.is_active !== false : true, password: '',
+  };
+  state.userFormError = '';
+  render();
+  setTimeout(() => document.getElementById('us-name')?.focus(), 0);
+}
+function closeUserSheet() { state.userSheet = null; render(); }
+function setUserSheet(field, value, rerender) { if (state.userSheet) { state.userSheet[field] = value; if (rerender) render(); } }
+async function saveUserSheet() {
+  const d = state.userSheet;
+  if (!d) return;
+  if (!d.name.trim()) { state.userFormError = 'Укажите имя'; render(); return; }
+  try {
+    if (d.id) {
+      const body = { name: d.name.trim(), phone: d.phone, role: d.role, is_active: d.is_active };
+      if (d.password) body.password = d.password;
+      await api('/users/' + d.id, { method: 'PUT', body });
+      showToast('Сохранено');
+    } else {
+      if (!d.username.trim() || !d.password) { state.userFormError = 'Укажите логин и пароль для входа'; render(); return; }
+      await api('/users', { method: 'POST', body: { name: d.name.trim(), username: d.username.trim(), password: d.password, role: d.role, phone: d.phone } });
+      showToast('Сотрудник добавлен');
+    }
+    state.userSheet = null;
+    await loadUsers();
+    render();
+  } catch (err) { state.userFormError = err.message; render(); }
+}
+async function deleteUserFromSheet() {
+  const d = state.userSheet;
+  if (!d || !d.id || !confirm('Удалить сотрудника «' + d.name + '»?')) return;
+  try {
+    await api('/users/' + d.id, { method: 'DELETE' });
+    state.userSheet = null;
+    await loadUsers();
+    render();
+    showToast('Сотрудник удалён');
+  } catch (err) { state.userFormError = err.message; render(); }
+}
+
+function renderUsers() {
+  const active = allUsers.filter(u => u.is_active !== false).length;
+  const onShift = allUsers.filter(u => u.open_shift_id).length;
+  const cards = allUsers.map(u => {
+    const diff = Number(u.diff_30d) || 0;
+    return `
+    <button class="pl-row emp-row ${u.is_active === false ? 'off' : ''}" onclick="openUserSheet(${u.id})">
+      <div class="emp-avatar ${u.role}">${esc(u.name.trim().charAt(0).toUpperCase())}</div>
+      <div class="pl-main">
+        <div class="pl-name">${esc(u.name)} <span class="badge ${u.role === 'admin' ? 'badge-admin' : 'badge-cashier'}">${u.role === 'admin' ? 'Админ' : 'Кассир'}</span></div>
+        <div class="pl-sub"><span class="mono">${esc(u.username)}</span>${u.phone ? `<span>${esc(u.phone)}</span>` : ''}</div>
+        <div class="pl-cost">за 30 дн.: ${u.shifts_30d} смен · ${u.receipts_30d} чек. · ${fmt(u.revenue_30d)}${diff < -0.009 ? ` · <span class="emp-short">недостачи ${fmt(-diff)}</span>` : ''}</div>
+      </div>
+      <div class="pl-right">
+        ${u.is_active === false ? '<span class="pl-stock out">отключён</span>'
+          : u.open_shift_id ? `<span class="pl-stock ok">на смене с ${fmtTime(u.open_shift_at)}</span>`
+          : `<span class="pl-stock idle">${u.last_shift_at ? 'смена ' + new Date(u.last_shift_at).toLocaleDateString('ru-RU') : 'смен не было'}</span>`}
+      </div>
+      <span class="pl-chev" aria-hidden="true">›</span>
+    </button>`;
+  }).join('');
+  return `
+  <div class="page-head">
+    <div><h2>Сотрудники</h2><div class="page-sub">Кассиры и администраторы: доступ, телефоны, смены и выручка</div></div>
+    <button class="btn btn-hop" onclick="openUserSheet(null)">+ Сотрудник</button>
+  </div>
+  <div class="pl-stats">
+    <div class="pl-stat"><span>Активных</span><b>${active}</b></div>
+    <div class="pl-stat"><span>Сейчас на смене</span><b>${onShift}</b></div>
+  </div>
+  <div class="pl-list">${cards}</div>
+  ${state.userSheet ? renderUserSheet() : ''}`;
+}
+
+function renderUserSheet() {
+  const d = state.userSheet;
+  const isNew = !d.id;
+  const isSelf = d.id === state.currentUser.id;
+  return `
+  <div class="modal-overlay sheet-overlay" onclick="if(event.target===this) closeUserSheet()">
+    <div class="sheet" role="dialog" aria-label="Сотрудник">
+      <div class="sheet-head"><h3>${isNew ? 'Новый сотрудник' : 'Сотрудник'}</h3><button class="pay2-close sheet-close" onclick="closeUserSheet()" aria-label="Закрыть">×</button></div>
+      <div class="sheet-body">
+        ${state.userFormError ? `<div class="login-error">${esc(state.userFormError)}</div>` : ''}
+        <div class="field"><label>Имя и фамилия</label><input id="us-name" type="text" value="${esc(d.name)}" placeholder="Айгуль Сапарова" oninput="setUserSheet('name', this.value)"></div>
+        <div class="pe-grid">
+          <div class="field"><label>Логин для входа</label><input type="text" autocomplete="off" value="${esc(d.username)}" ${isNew ? '' : 'disabled'} placeholder="aigul" oninput="setUserSheet('username', this.value)"></div>
+          <div class="field"><label>Телефон</label><input type="tel" value="${esc(d.phone)}" placeholder="+7 700 000 00 00" oninput="setUserSheet('phone', this.value)"></div>
+        </div>
+        <div class="field"><label>${isNew ? 'Пароль' : 'Новый пароль (если нужно сменить)'}</label><input type="text" autocomplete="new-password" value="${esc(d.password)}" placeholder="${isNew ? 'минимум 4 символа' : 'оставьте пустым'}" oninput="setUserSheet('password', this.value)"></div>
+        <div class="field"><label>Роль</label>
+          <div class="pe-seg">
+            <button class="${d.role === 'cashier' ? 'active' : ''}" onclick="setUserSheet('role', 'cashier', true)">Кассир</button>
+            <button class="${d.role === 'admin' ? 'active' : ''}" onclick="setUserSheet('role', 'admin', true)">Администратор</button>
+          </div>
+          <div class="page-sub" style="margin-top:6px;">${d.role === 'admin' ? 'Полный доступ: открытие и закрытие смен, товары, цены, склад, отчёты, сотрудники.' : 'Касса (в смене, которую открыл администратор), приём и возврат товара, свои чеки. Цены закупа и отчёты смен не видит.'}</div>
+        </div>
+        ${isNew || isSelf ? '' : `
+        <div class="field"><label>Доступ</label>
+          <div class="pe-seg">
+            <button class="${d.is_active ? 'active' : ''}" onclick="setUserSheet('is_active', true, true)">Работает</button>
+            <button class="${!d.is_active ? 'active off' : ''}" onclick="setUserSheet('is_active', false, true)">Отключён</button>
+          </div>
+          <div class="page-sub" style="margin-top:6px;">Отключённый сотрудник не сможет войти. Его чеки и смены останутся в истории.</div>
+        </div>`}
+      </div>
+      <div class="sheet-actions">
+        ${isNew || isSelf ? '' : `<button class="btn btn-danger pe-del" onclick="deleteUserFromSheet()" title="Удалить можно только сотрудника без чеков и смен">${icon('trash', 18)}<span>Удалить</span></button>`}
+        <button class="btn btn-ghost" style="flex:1;" onclick="closeUserSheet()">Отмена</button>
+        <button class="btn btn-hop pe-save" onclick="saveUserSheet()">${icon('check', 20)} ${isNew ? 'Добавить' : 'Сохранить'}</button>
+      </div>
+    </div>
   </div>`;
 }
 
@@ -2840,6 +3314,7 @@ function render() {
   else if (state.view === 'trash' && state.currentUser.role === 'admin') viewHtml = renderTrash();
   else if (state.view === 'analytics' && state.currentUser.role === 'admin') viewHtml = renderAnalytics();
   else if (state.view === 'users' && state.currentUser.role === 'admin') viewHtml = renderUsers();
+  else if (state.view === 'shifts' && state.currentUser.role === 'admin') viewHtml = renderShifts();
   else viewHtml = renderPOS();
 
   app.innerHTML = `
